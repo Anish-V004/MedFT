@@ -222,6 +222,31 @@ def run_dataset_pipeline(df, dataset_type, rsi_mapping, limit=None, model_name='
     print(f"\nProcessing {dataset_type.upper()} dataset. Outputs will be saved to '{output_path}'")
     print(f"Found {len(processed_keys)} already processed records to skip.")
     
+    # Pre-calculate active rows to process (not in processed_keys and having narrative)
+    active_rows = []
+    for idx, row in df.iterrows():
+        if dataset_type == 'biodex':
+            narrative, drug = map_biodex_row(row)
+        else:
+            narrative, drug = map_fda_row(row)
+            
+        if not narrative:
+            continue
+            
+        key = hashlib.md5(narrative.encode('utf-8')).hexdigest()
+        if key in processed_keys:
+            continue
+            
+        active_rows.append((idx, row, narrative, drug, key))
+        
+    total_active = len(active_rows)
+    # Apply limit if any
+    if limit is not None:
+        active_rows = active_rows[:limit]
+        total_active = len(active_rows)
+        
+    print(f"Total remaining rows to process in this run: {total_active}")
+    
     # Initialize Gemini model lazily in the loop
     model = None
     
@@ -243,31 +268,9 @@ Perform three tasks:
     count_processed = 0
     samples_shown = []
     
-    for idx, row in df.iterrows():
-        # Get narrative and drug
-        if dataset_type == 'biodex':
-            narrative, drug = map_biodex_row(row)
-        else:
-            narrative, drug = map_fda_row(row)
-            
-        if not narrative:
-            continue
-            
-        # Programmatic Heuristic & Grounding Check: skip row if narrative is invalid (length, junk phrases, drug mention)
-        if not is_valid_narrative(narrative, drug):
-            continue
-            
-        # Deduplication key
-        key = hashlib.md5(narrative.encode('utf-8')).hexdigest()
-        if key in processed_keys:
-            continue
-            
+    for idx, row, narrative, drug, key in active_rows:
         rsi_text = rsi_mapping.get(drug, "RSI not available")
         
-        # Stop if we hit the limit
-        if limit is not None and count_processed >= limit:
-            break
-            
         # Prompt construction
         prompt_text = prompt_template.format(
             suspected_drug=drug,
@@ -275,7 +278,9 @@ Perform three tasks:
             rsi_text=rsi_text
         )
         
-        print(f" [{count_processed+1}] Querying Gemini for suspect drug '{drug}'...")
+        # Progress logging
+        left = total_active - count_processed
+        print(f" [{count_processed}/{total_active} done, {left} left] Querying Gemini for suspect drug '{drug}'...")
         
         # Call Gemini API with Pydantic JSON enforcement and robust retry block
         success = False
@@ -381,7 +386,15 @@ def main():
                         help="If set, runs the full datasets (ignores --limit).")
     parser.add_argument('--model', type=str, default='gemini-3.1-flash-lite',
                         help="Gemini model to use. Default is gemini-3.1-flash-lite.")
+    parser.add_argument('--biodex', action='store_true',
+                        help="Run only the BioDEX dataset.")
+    parser.add_argument('--openfda', action='store_true',
+                        help="Run only the openFDA dataset.")
     args = parser.parse_args()
+    
+    # Determine which datasets to run (if neither is specified, run both)
+    run_biodex = args.biodex or not (args.biodex or args.openfda)
+    run_openfda = args.openfda or not (args.biodex or args.openfda)
     
     # Verify input datasets
     if not os.path.exists(BIODEX_INPUT_PATH) or not os.path.exists(FDA_INPUT_PATH):
@@ -395,11 +408,20 @@ def main():
     if args.full_run:
         bio_limit = None
         fda_limit = None
-        print(f"Beginning FULL pipeline execution. BioDEX size: {len(df_bio)} rows, openFDA size: {len(df_fda)} rows.")
+        bio_size = len(df_bio) if run_biodex else 0
+        fda_size = len(df_fda) if run_openfda else 0
+        print(f"Beginning FULL pipeline execution. Target BioDEX size: {bio_size} rows, Target openFDA size: {fda_size} rows.")
     else:
-        # Balanced 10-sample limit (5 from each)
-        bio_limit = args.limit // 2
-        fda_limit = args.limit - bio_limit
+        if run_biodex and run_openfda:
+            bio_limit = args.limit // 2
+            fda_limit = args.limit - bio_limit
+        elif run_biodex:
+            bio_limit = args.limit
+            fda_limit = 0
+        elif run_openfda:
+            bio_limit = 0
+            fda_limit = args.limit
+            
         print(f"Beginning TEST run: targeting {args.limit} samples ({bio_limit} from BioDEX, {fda_limit} from openFDA).")
         
     # Phase 1: Load RSI Mapping Cache
@@ -438,10 +460,14 @@ def main():
     print("="*50)
     
     # Process BioDEX
-    bio_count, bio_samples = run_dataset_pipeline(df_bio, 'biodex', rsi_mapping, limit=bio_limit, model_name=args.model)
+    bio_count, bio_samples = 0, []
+    if run_biodex:
+        bio_count, bio_samples = run_dataset_pipeline(df_bio, 'biodex', rsi_mapping, limit=bio_limit, model_name=args.model)
     
     # Process openFDA
-    fda_count, fda_samples = run_dataset_pipeline(df_fda, 'openfda', rsi_mapping, limit=fda_limit, model_name=args.model)
+    fda_count, fda_samples = 0, []
+    if run_openfda:
+        fda_count, fda_samples = run_dataset_pipeline(df_fda, 'openfda', rsi_mapping, limit=fda_limit, model_name=args.model)
     
     print(f"\nExtraction complete. Successfully processed: {bio_count} BioDEX samples, {fda_count} openFDA samples.")
     
