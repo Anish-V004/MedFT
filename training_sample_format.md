@@ -48,15 +48,15 @@ The patient developed acute profound thrombocytopenia (platelet count 2 K/uL) fo
 
 ```json
 {
-  "causality": {
-    "interpretation": "Probable",
-    "naranjo_score": 7
-  },
-  "expectedness": "Expected",
-  "meddra_pt": "Thrombocytopenia",
   "seriousness": {
-    "criteria": "other serious medical event",
-    "is_serious": true
+    "is_serious": true,
+    "criteria": "other serious medical event"
+  },
+  "meddra_pt": "Thrombocytopenia",
+  "expectedness": "Expected",
+  "causality": {
+    "naranjo_score": 7,
+    "interpretation": "Probable"
   }
 }
 ```

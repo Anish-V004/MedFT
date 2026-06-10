@@ -164,11 +164,13 @@ The patient experienced a myocardial infarction and cardiac arrest while taking 
    * openFDA cardiology subset: **3,000 rows**.
 2. **RSI Label Cache**: Complete.
    * Successfully cached **1,551 unique drugs** in `data/rsi_mapping.json`.
-3. **BioDEX Generation Progress**: **In Progress**.
-   * Run command: `uv run .\generate_reviews.py --full-run --biodex`
-   * Progress: **~601 / 2,645 rows completed**.
-4. **openFDA Generation**: **Not Started** (waiting for BioDEX to complete).
-5. **Final Balancing and Validation**: **Not Started**.
+3. **BioDEX Generation Progress**: **Complete**.
+   * Successfully processed all rows; **2,465 valid records** passed validation checks.
+4. **openFDA Generation**: **Complete**.
+   * Successfully processed all rows; **2,999 valid records** passed validation checks.
+5. **Final Balancing and Validation**: **Complete**.
+   * Output dataset `data/golden_train_3000.jsonl` compiled with exactly **3,000 records** (2,700 medical reviews and 300 synthetic negatives).
+
 
 ### Notable Multi-Drug Analysis
 A parsing analysis of the pre-processed files showed:
