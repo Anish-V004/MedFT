@@ -58,7 +58,7 @@ Retains only clinical features necessary for LLM reasoning and ChatML constructi
   - **Seriousness**: Based on standard regulatory criteria.
   - **Expectedness**: Compared against the RSI.
   - **Causality**: A step-by-step Naranjo score evaluation.
-- Features API key rotation to bypass rate limits gracefully.
+- **Concurrent Batch Processing**: Features multi-threaded execution utilizing a thread-safe `google-genai` client pool. By providing multiple API keys in the `.env` file, the script distributes rate-limits across all keys simultaneously, processing multiple rows in parallel with intelligent exponential backoff on quota limits.
 
 ### Stage 5: Final Dataset Compilation
 `scripts/compile_dataset.py` parses the Gemini evaluations, filters out bad responses, and balances the final dataset into 3,000 cases:

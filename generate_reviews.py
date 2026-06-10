@@ -9,8 +9,12 @@ import requests
 import pandas as pd
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import re
+import queue
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 # Reconfigure stdout to use UTF-8 to prevent console encoding errors on Windows
 sys.stdout.reconfigure(encoding='utf-8')
@@ -46,8 +50,14 @@ def mask_key(k):
     return k[:8] + "..." + k[-4:] if len(k) > 12 else "..."
 
 print(f"Loaded {len(api_keys)} Gemini API Key(s) for rotation: {[mask_key(k) for k in api_keys]}")
-current_key_idx = 0
-genai.configure(api_key=api_keys[0])
+
+# Create thread-safe pool of clients
+client_queue = queue.Queue()
+for k in api_keys:
+    client_queue.put(genai.Client(api_key=k))
+    
+# Thread-safe lock for file writing
+file_lock = threading.Lock()
 
 # Define Structured Output Schema using Pydantic
 class SeriousnessDetails(BaseModel):
@@ -247,8 +257,7 @@ def run_dataset_pipeline(df, dataset_type, rsi_mapping, limit=None, model_name='
         
     print(f"Total remaining rows to process in this run: {total_active}")
     
-    # Initialize Gemini model lazily in the loop
-    model = None
+    # We no longer need model=None initialization here
     
     prompt_template = """Conduct a medical safety review of the following adverse event case:
 
@@ -268,112 +277,99 @@ Perform three tasks:
     count_processed = 0
     samples_shown = []
     
-    for idx, row, narrative, drug, key in active_rows:
+    def process_row(args):
+        idx, row, narrative, drug, key = args
         rsi_text = rsi_mapping.get(drug, "RSI not available")
         
-        # Prompt construction
         prompt_text = prompt_template.format(
             suspected_drug=drug,
             patient_narrative=narrative,
             rsi_text=rsi_text
         )
         
-        # Progress logging
-        left = total_active - count_processed
-        print(f" [{count_processed}/{total_active} done, {left} left] Querying Gemini for suspect drug '{drug}'...")
-        
-        # Call Gemini API with Pydantic JSON enforcement and robust retry block
         success = False
         retry_count = 0
-        consecutive_key_failures = 0
-        global current_key_idx
+        chatml_record = None
         
         while not success:
+            # Get an available client (this blocks if all clients are currently executing a request)
+            client = client_queue.get()
             try:
-                # If we need to reconfigure/initialize the model
-                if model is None:
-                    current_key = api_keys[current_key_idx]
-                    genai.configure(api_key=current_key)
-                    model = genai.GenerativeModel(model_name, system_instruction=system_prompt)
-                    
-                response = model.generate_content(
-                    prompt_text,
-                    generation_config={
-                        "response_mime_type": "application/json",
-                        "response_schema": PVReviewResponse
-                    }
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt_text,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=PVReviewResponse,
+                        system_instruction=system_prompt,
+                    )
                 )
                 
-                # Check response
                 if response.text:
                     response_json = json.loads(response.text)
                     success = True
-                    consecutive_key_failures = 0  # Reset on success
+                    
+                    chain_of_thought = response_json.get('chain_of_thought', '')
+                    decision_data = {k: v for k, v in response_json.items() if k != 'chain_of_thought'}
+                    json_block = json.dumps(decision_data, indent=2)
+                    
+                    assistant_content = f"{chain_of_thought}\n\n```json\n{json_block}\n```"
+                    user_content = f"Patient Narrative:\n{narrative}\n\nReference Safety Information (RSI):\n{rsi_text}"
+                    
+                    chatml_record = {
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_content},
+                            {"role": "assistant", "content": assistant_content}
+                        ]
+                    }
                 else:
                     raise Exception("Empty response text returned.")
             except Exception as e:
                 error_str = str(e)
-                # Check if it's a rate limit or quota error (429, resource exhausted, quota exceeded)
                 is_rate_limit = "429" in error_str or "quota" in error_str.lower() or "resourceexhausted" in error_str.lower() or "exhausted" in error_str.lower()
                 
-                if is_rate_limit and len(api_keys) > 1:
-                    consecutive_key_failures += 1
-                    if consecutive_key_failures >= len(api_keys):
-                        # All keys failed consecutively, sleep to reset window
-                        wait_time = 65
-                        print(f"  All {len(api_keys)} API keys hit rate/quota limit consecutively. Sleeping {wait_time}s to reset window...")
-                        time.sleep(wait_time)
-                        consecutive_key_failures = 0 # Reset count to retry
-                    else:
-                        old_idx = current_key_idx
-                        current_key_idx = (current_key_idx + 1) % len(api_keys)
-                        masked_old = api_keys[old_idx][:8] + "..." + api_keys[old_idx][-4:] if len(api_keys[old_idx]) > 12 else "..."
-                        masked_new = api_keys[current_key_idx][:8] + "..." + api_keys[current_key_idx][-4:] if len(api_keys[current_key_idx]) > 12 else "..."
-                        print(f"  API Key {old_idx} ({masked_old}) hit rate/quota limit. Rotating to API Key {current_key_idx} ({masked_new})...")
-                        model = None # Force re-initialization with new key
-                        time.sleep(1) # Small pause
+                if is_rate_limit:
+                    # Specific key hit rate limit, backoff gently (other keys continue unhindered)
+                    time.sleep(10)
                 else:
-                    # Non-rate-limit error or we only have 1 key
                     retry_count += 1
                     if retry_count >= 3:
-                        print(f"  Fatal Error: Failed to process sample after {retry_count} attempts. Error: {e}. Terminating program.")
-                        sys.exit(1)
-                    wait_time = retry_count * 5
-                    print(f"  Error calling Gemini API: {e}. Retrying in {wait_time}s...")
-                    time.sleep(wait_time)
+                        print(f"  Fatal Error processing drug '{drug}': {e}.")
+                        break
+                    time.sleep(retry_count * 5)
+            finally:
+                # Always return the client to the queue
+                client_queue.put(client)
+                
+        return key, chatml_record, drug
+
+    # Concurrency control: max workers equal to number of keys * 2 (or just number of keys)
+    # Using len(api_keys) * 2 allows pipeline to keep queueing requests, but queue.get() regulates API load
+    max_workers = max(1, len(api_keys) * 2)
+    print(f"Executing {total_active} rows concurrently with {max_workers} threads across {len(api_keys)} API keys...")
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_row = {executor.submit(process_row, args): args for args in active_rows}
+        
+        for future in as_completed(future_to_row):
+            key, chatml_record, drug = future.result()
             
-        # Format the review responses
-        chain_of_thought = response_json.get('chain_of_thought', '')
-        decision_data = {k: v for k, v in response_json.items() if k != 'chain_of_thought'}
-        json_block = json.dumps(decision_data, indent=2)
-        
-        assistant_content = f"{chain_of_thought}\n\n```json\n{json_block}\n```"
-        user_content = f"Patient Narrative:\n{narrative}\n\nReference Safety Information (RSI):\n{rsi_text}"
-        
-        # Format in ChatML
-        chatml_record = {
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-                {"role": "assistant", "content": assistant_content}
-            ]
-        }
-        
-        # Save progressively row-by-row
-        with open(output_path, 'a', encoding='utf-8') as f_out:
-            f_out.write(json.dumps(chatml_record, ensure_ascii=False) + '\n')
-            
-        count_processed += 1
-        processed_keys.add(key)
-        
-        # Collect test samples to display to the user
-        if limit is not None:
-            samples_shown.append(chatml_record)
-            
-        # Rate Limiting: Capped at 5 RPM on Gemini 3.5 Flash Free Tier.
-        # Sleep 12.5 seconds to ensure ~4.8 RPM.
-        time.sleep(12.5)
-        
+            if chatml_record:
+                # Thread-safe file writing
+                with file_lock:
+                    with open(output_path, 'a', encoding='utf-8') as f_out:
+                        f_out.write(json.dumps(chatml_record, ensure_ascii=False) + '\n')
+                        
+                    count_processed += 1
+                    processed_keys.add(key)
+                    
+                    if limit is not None and len(samples_shown) < limit:
+                        samples_shown.append(chatml_record)
+                        
+                    left = total_active - count_processed
+                    print(f" [{count_processed}/{total_active} done, {left} left] Completed review for '{drug}'")
+                    
     return count_processed, samples_shown
 
 
