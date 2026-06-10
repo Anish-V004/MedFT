@@ -25,7 +25,29 @@ FDA_OUTPUT_PATH = os.path.join(DATA_DIR, 'fda_chatml.jsonl')
 
 # Load .env file
 load_dotenv(dotenv_path=".env")
-genai.configure(api_key=os.environ.get('GEMINI_API_KEY'))
+
+# Parse API keys for rotation
+api_keys = []
+keys_str = os.environ.get('GEMINI_API_KEYS') or os.environ.get('GEMINI_API_KEY')
+if keys_str:
+    api_keys = [k.strip() for k in re.split(r'[,;]', keys_str) if k.strip()]
+    
+# Also check for numbered keys: GEMINI_API_KEY_1, GEMINI_API_KEY_2, etc.
+for idx in range(1, 10):
+    k = os.environ.get(f'GEMINI_API_KEY_{idx}')
+    if k and k.strip() and k.strip() not in api_keys:
+        api_keys.append(k.strip())
+
+if not api_keys:
+    print("Error: No GEMINI_API_KEY or GEMINI_API_KEYS found in environment.")
+    sys.exit(1)
+
+def mask_key(k):
+    return k[:8] + "..." + k[-4:] if len(k) > 12 else "..."
+
+print(f"Loaded {len(api_keys)} Gemini API Key(s) for rotation: {[mask_key(k) for k in api_keys]}")
+current_key_idx = 0
+genai.configure(api_key=api_keys[0])
 
 # Define Structured Output Schema using Pydantic
 class SeriousnessDetails(BaseModel):
@@ -108,11 +130,60 @@ def map_fda_row(row):
         if drugs_list:
             drug = drugs_list[0]
             
+    # Professional narrative phrasing
+    has_age = pd.notna(age)
+    has_sex = (sex != "unknown sex")
+    
+    if has_age and has_sex:
+        patient_str = f"A {int(age)} year-old {sex} patient"
+    elif has_age:
+        patient_str = f"A {int(age)} year-old patient of unknown sex"
+    elif has_sex:
+        patient_str = f"A patient of unknown age {sex}"
+    else:
+        patient_str = "A patient of unknown age and sex"
+        
     narrative = (
-        f"A {f'{int(age)} year-old' if pd.notna(age) else 'patient of unknown age'} {sex} patient "
-        f"experienced the following adverse events: {reactions}. The suspected drug is {drugs}."
+        f"{patient_str} experienced the following adverse events: {reactions}. The suspected drug is {drugs}."
     )
     return narrative, drug
+
+def is_valid_narrative(narrative, drug):
+    """Checks if a patient narrative is valid (length, junk terms, drug presence)."""
+    if not narrative or not isinstance(narrative, str):
+        return False
+        
+    narrative_lower = narrative.lower()
+    
+    # 1. Length check: clinical narratives should be at least 15 words
+    if len(narrative_lower.split()) < 15:
+        return False
+        
+    # 2. Administrative/junk phrase matching
+    junk_phrases = [
+        "no new information",
+        "medical records requested",
+        "medical records not provided",
+        "consumer called",
+        "product quality complaint",
+        "refund",
+        "no additional information",
+        "further information has been requested"
+    ]
+    for junk in junk_phrases:
+        if junk in narrative_lower:
+            return False
+            
+    # Check for empty or generic placeholder narratives
+    if narrative_lower.strip() in ["blank", "unknown", "nan", "none", "n/a", "null"]:
+        return False
+        
+    # 3. Suspected drug mention check
+    clean_drug = clean_drug_name_for_api(drug)
+    if not clean_drug or clean_drug not in narrative_lower:
+        return False
+        
+    return True
 
 def load_processed_keys(output_path):
     """Loads keys of processed examples from output JSONL file to support resuming."""
@@ -135,76 +206,7 @@ def load_processed_keys(output_path):
             print(f"Warning: Failed to parse existing output file {output_path} ({e}).")
     return processed
 
-def clean_existing_chatml_file(output_path, df, dataset_type, system_prompt):
-    """Cleans existing ChatML output file by removing records with outdated system prompts
-    or where the suspected drug is not mentioned in the narrative."""
-    if not os.path.exists(output_path):
-        return
-        
-    # Build narrative-to-drug mapping from current dataframe to check drug presence
-    narrative_to_drug = {}
-    for idx, row in df.iterrows():
-        if dataset_type == 'biodex':
-            narrative, drug = map_biodex_row(row)
-        else:
-            narrative, drug = map_fda_row(row)
-        if narrative:
-            key = hashlib.md5(narrative.encode('utf-8')).hexdigest()
-            narrative_to_drug[key] = drug
-
-    valid_lines = []
-    removed_count = 0
-    
-    try:
-        with open(output_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                try:
-                    data = json.loads(line)
-                    messages = data.get('messages', [])
-                    if len(messages) < 3:
-                        removed_count += 1
-                        continue
-                        
-                    # Check system prompt
-                    sys_content = messages[0].get('content', '')
-                    if sys_content != system_prompt:
-                        removed_count += 1
-                        continue
-                        
-                    # Extract narrative
-                    user_content = messages[1].get('content', '')
-                    if "\n\nReference Safety Information (RSI):" in user_content:
-                        narrative_part = user_content.split("\n\nReference Safety Information (RSI):")[0]
-                    else:
-                        narrative_part = user_content
-                    clean_narrative = narrative_part.replace("Patient Narrative:\n", "").strip()
-                    key = hashlib.md5(clean_narrative.encode('utf-8')).hexdigest()
-                    
-                    # Look up drug in mapping
-                    drug = narrative_to_drug.get(key)
-                    if not drug:
-                        removed_count += 1
-                        continue
-                        
-                    clean_drug = clean_drug_name_for_api(drug)
-                    if not clean_drug or clean_drug not in clean_narrative.lower():
-                        removed_count += 1
-                        continue
-                        
-                    valid_lines.append(line)
-                except Exception:
-                    removed_count += 1
-                    
-        if removed_count > 0:
-            print(f"  --> Cleaning output file '{output_path}': removed {removed_count} outdated/invalid records.")
-            with open(output_path, 'w', encoding='utf-8') as f_out:
-                f_out.writelines(valid_lines)
-    except Exception as e:
-        print(f"Warning: Failed to clean existing output file {output_path} ({e}).")
-
-def run_dataset_pipeline(df, dataset_type, rsi_mapping, limit=None, model_name='gemini-2.5-flash'):
+def run_dataset_pipeline(df, dataset_type, rsi_mapping, limit=None, model_name='gemini-3.1-flash-lite'):
     """Processes rows through Gemini, formats as ChatML, and appends to output files."""
     output_path = BIODEX_OUTPUT_PATH if dataset_type == 'biodex' else FDA_OUTPUT_PATH
     
@@ -215,16 +217,13 @@ def run_dataset_pipeline(df, dataset_type, rsi_mapping, limit=None, model_name='
         "If the provided RSI does not match the drug in the narrative, explicitly state 'Drug Mismatch - Cannot Evaluate' in your reasoning."
     )
     
-    # Clean output files of any outdated/invalid records
-    clean_existing_chatml_file(output_path, df, dataset_type, system_prompt)
-    
     processed_keys = load_processed_keys(output_path)
     
     print(f"\nProcessing {dataset_type.upper()} dataset. Outputs will be saved to '{output_path}'")
     print(f"Found {len(processed_keys)} already processed records to skip.")
     
-    # Initialize Gemini model
-    model = genai.GenerativeModel(model_name, system_instruction=system_prompt)
+    # Initialize Gemini model lazily in the loop
+    model = None
     
     prompt_template = """Conduct a medical safety review of the following adverse event case:
 
@@ -254,9 +253,8 @@ Perform three tasks:
         if not narrative:
             continue
             
-        # Programmatic Grounding Check: skip row if suspected drug is not mentioned in the narrative text
-        clean_drug = clean_drug_name_for_api(drug)
-        if not clean_drug or clean_drug not in narrative.lower():
+        # Programmatic Heuristic & Grounding Check: skip row if narrative is invalid (length, junk phrases, drug mention)
+        if not is_valid_narrative(narrative, drug):
             continue
             
         # Deduplication key
@@ -282,8 +280,17 @@ Perform three tasks:
         # Call Gemini API with Pydantic JSON enforcement and robust retry block
         success = False
         retry_count = 0
-        while not success and retry_count < 3:
+        consecutive_key_failures = 0
+        global current_key_idx
+        
+        while not success:
             try:
+                # If we need to reconfigure/initialize the model
+                if model is None:
+                    current_key = api_keys[current_key_idx]
+                    genai.configure(api_key=current_key)
+                    model = genai.GenerativeModel(model_name, system_instruction=system_prompt)
+                    
                 response = model.generate_content(
                     prompt_text,
                     generation_config={
@@ -296,23 +303,39 @@ Perform three tasks:
                 if response.text:
                     response_json = json.loads(response.text)
                     success = True
+                    consecutive_key_failures = 0  # Reset on success
                 else:
                     raise Exception("Empty response text returned.")
             except Exception as e:
-                retry_count += 1
                 error_str = str(e)
-                if retry_count >= 3:
-                    print(f"  Fatal Error: Failed to process sample after {retry_count} attempts. Error: {e}. Terminating program.")
-                    sys.exit(1)
+                # Check if it's a rate limit or quota error (429, resource exhausted, quota exceeded)
+                is_rate_limit = "429" in error_str or "quota" in error_str.lower() or "resourceexhausted" in error_str.lower() or "exhausted" in error_str.lower()
                 
-                # Check if it's a rate limit error (429 or quota exceeded)
-                if "429" in error_str or "quota" in error_str.lower() or "resourceexhausted" in error_str.lower():
-                    wait_time = 65  # Sleep for a full minute + padding to clear the RPM window
-                    print(f"  Rate limit (429) hit: {error_str.strip()}. Waiting {wait_time}s for window to reset...")
+                if is_rate_limit and len(api_keys) > 1:
+                    consecutive_key_failures += 1
+                    if consecutive_key_failures >= len(api_keys):
+                        # All keys failed consecutively, sleep to reset window
+                        wait_time = 65
+                        print(f"  All {len(api_keys)} API keys hit rate/quota limit consecutively. Sleeping {wait_time}s to reset window...")
+                        time.sleep(wait_time)
+                        consecutive_key_failures = 0 # Reset count to retry
+                    else:
+                        old_idx = current_key_idx
+                        current_key_idx = (current_key_idx + 1) % len(api_keys)
+                        masked_old = api_keys[old_idx][:8] + "..." + api_keys[old_idx][-4:] if len(api_keys[old_idx]) > 12 else "..."
+                        masked_new = api_keys[current_key_idx][:8] + "..." + api_keys[current_key_idx][-4:] if len(api_keys[current_key_idx]) > 12 else "..."
+                        print(f"  API Key {old_idx} ({masked_old}) hit rate/quota limit. Rotating to API Key {current_key_idx} ({masked_new})...")
+                        model = None # Force re-initialization with new key
+                        time.sleep(1) # Small pause
                 else:
+                    # Non-rate-limit error or we only have 1 key
+                    retry_count += 1
+                    if retry_count >= 3:
+                        print(f"  Fatal Error: Failed to process sample after {retry_count} attempts. Error: {e}. Terminating program.")
+                        sys.exit(1)
                     wait_time = retry_count * 5
                     print(f"  Error calling Gemini API: {e}. Retrying in {wait_time}s...")
-                time.sleep(wait_time)
+                    time.sleep(wait_time)
             
         # Format the review responses
         chain_of_thought = response_json.get('chain_of_thought', '')
@@ -356,8 +379,8 @@ def main():
                         help="Total samples to process during validation. Default is 10.")
     parser.add_argument('--full-run', action='store_true',
                         help="If set, runs the full datasets (ignores --limit).")
-    parser.add_argument('--model', type=str, default='gemini-2.5-flash',
-                        help="Gemini model to use. Default is gemini-2.5-flash.")
+    parser.add_argument('--model', type=str, default='gemini-3.1-flash-lite',
+                        help="Gemini model to use. Default is gemini-3.1-flash-lite.")
     args = parser.parse_args()
     
     # Verify input datasets
