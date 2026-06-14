@@ -1,0 +1,12 @@
+tmux new -s med_train
+python train.py 2>&1 | tee training.log
+Ctrl+B, D
+tmux attach -t med_train
+
+# To kill your specific medical training session
+tmux kill-session -t med_train
+
+tmux ls
+tmux kill-session -t <session_name>
+
+tmux attach -t med_train
