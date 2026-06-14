@@ -9,12 +9,37 @@ VALID_SERIOUSNESS_CRITERIA = {
     'congenital anomaly', 'other serious medical event', 'none'
 }
 
-EXPECTED_SYSTEM_PROMPT = (
+import os
+import json
+import re
+import argparse
+
+VALID_NARANJO_INTERPRETATIONS = {'definite', 'probable', 'possible', 'doubtful'}
+VALID_SERIOUSNESS_CRITERIA = {
+    'death', 'hospitalization', 'life-threatening', 'disabling',
+    'congenital anomaly', 'other serious medical event', 'none'
+}
+
+EXPECTED_SYSTEM_PROMPT_V1 = (
     "You are a Pharmacovigilance (PV) Medical Review Assistant. "
     "CRITICAL GROUNDING RULE: You must base your entire evaluation STRICTLY and EXCLUSIVELY on the provided Patient Narrative. "
     "Do NOT invent, hallucinate, or bring in external patient cases. Do NOT reference drugs or adverse events that are not explicitly written in the user's prompt. "
     "If the provided RSI does not match the drug in the narrative, explicitly state 'Drug Mismatch - Cannot Evaluate' in your reasoning."
 )
+
+EXPECTED_SYSTEM_PROMPT_V2 = (
+    "You are a Pharmacovigilance (PV) Medical Review Assistant.\n\n"
+    "CRITICAL RULES:\n"
+    "1. Base evaluations strictly on the Patient Narrative. Do not hallucinate external details.\n"
+    "2. Output a clinical Chain of Thought, then a markdown JSON block containing exactly: "
+    "'seriousness', 'meddra_pt', 'expectedness', and 'causality'. Do NOT include 'chain_of_thought' inside the JSON.\n\n"
+    "SCENARIOS:\n"
+    "1. Valid Case: Assess Seriousness (criteria & MedDRA PT), Expectedness (via RSI or label knowledge), and Causality (Naranjo score & interpretation).\n"
+    "2. Drug Mismatch: State \"Drug Mismatch - Cannot Evaluate\" in reasoning. Set expectedness to \"Unexpected\" and causality to {\"naranjo_score\": 0, \"interpretation\": \"Doubtful\"}.\n"
+    "3. Negative Control (Missing drug/event or noise): State \"Evaluation failed: [reason]\". Set seriousness to {\"is_serious\": false, \"criteria\": \"none\"}, meddra_pt to \"None\", expectedness to \"Unexpected\", and causality to {\"naranjo_score\": 0, \"interpretation\": \"Unassessable - Missing Data\"}."
+)
+
+VALID_SYSTEM_PROMPTS = {EXPECTED_SYSTEM_PROMPT_V1, EXPECTED_SYSTEM_PROMPT_V2}
 
 
 def validate_record(idx, data):
@@ -42,7 +67,7 @@ def validate_record(idx, data):
 
     # Check 7: System prompt integrity
     sys_content = messages[0].get('content', '')
-    if sys_content != EXPECTED_SYSTEM_PROMPT:
+    if sys_content not in VALID_SYSTEM_PROMPTS:
         return False, "Stale or mismatched system prompt."
 
     assistant_content = messages[2].get('content', '')
@@ -148,6 +173,8 @@ def main():
                         help="Path to the BioDEX ChatML output file.")
     parser.add_argument('--fda', type=str, default='data/fda_chatml.jsonl',
                         help="Path to the openFDA ChatML output file.")
+    parser.add_argument('--file', type=str, default=None,
+                        help="Validate a single specific dataset file directly (e.g. data/pv_safety_review_dataset_3000_v2.jsonl).")
     args = parser.parse_args()
 
     print("=" * 52)
@@ -157,7 +184,9 @@ def main():
     total_validated = 0
     total_flagged = 0
 
-    for path in [args.biodex, args.fda]:
+    paths_to_validate = [args.file] if args.file else [args.biodex, args.fda]
+
+    for path in paths_to_validate:
         total, flagged = validate_jsonl_file(path)
         total_validated += total
         total_flagged += flagged

@@ -61,11 +61,10 @@ Retains only clinical features necessary for LLM reasoning and ChatML constructi
 - **Concurrent Batch Processing**: Features multi-threaded execution utilizing a thread-safe `google-genai` client pool. By providing multiple API keys in the `.env` file, the script distributes rate-limits across all keys simultaneously, processing multiple rows in parallel with intelligent exponential backoff on quota limits.
 
 ### Stage 5: Final Dataset Compilation
-`scripts/compile_dataset.py` parses the Gemini evaluations, filters out bad responses, and balances the final dataset into 3,000 cases:
-- 900 Definite/Probable Cases
-- 900 Possible Cases
-- 900 Doubtful Cases
-- 300 Synthetic Negative Cases (Missing drug, missing event, or administrative noise).
+`scripts/compile_dataset_v2.py` parses the Gemini evaluations, filters out bad responses, limits drug mismatch cases to exactly 150, programmatically updates the dataset to the optimized concise system prompt, filters out records exceeding 6,000 tokens, and balances the final dataset into 3,000 cases:
+- 2,550 Aligned Cardiology Cases (balanced across Doubtful, Possible, and Probable/Definite Naranjo causality tiers)
+- 150 Drug Mismatch Cases (clinical refusals)
+- 300 Synthetic Negative Cases (Missing drug, missing event, or administrative noise)
 
 ---
 
@@ -119,16 +118,16 @@ uv run python generate_reviews.py --full-run --biodex
 uv run python generate_reviews.py --full-run --openfda
 ```
 
-#### Step D: Compile the Final Balanced Dataset
-Once the LLM extraction is complete, compile the final `pv_safety_review_dataset_3000.jsonl` containing positive cases and synthetically injected negative cases.
+#### Step D: Compile the Final Balanced Dataset (V2)
+Once the LLM extraction is complete, compile the final `pv_safety_review_dataset_3000_v2.jsonl` containing aligned cases, drug mismatch limits, and synthetically injected negative cases.
 ```bash
-uv run python scripts/compile_dataset.py
+uv run python scripts/compile_dataset_v2.py
 ```
 
 #### Step E: Validate Outputs
-Verify that the output datasets strictly conform to the expected ChatML schema:
+Verify that the compiled dataset strictly conforms to the expected ChatML schema and system prompts:
 ```bash
-uv run python scripts/validate_outputs.py
+uv run python scripts/validate_outputs.py --file data/pv_safety_review_dataset_3000_v2.jsonl
 ```
 
 ---
@@ -141,7 +140,7 @@ You can easily load the final generated ChatML dataset into a pandas DataFrame:
 import pandas as pd
 
 # Load the Golden Fine-Tuning Dataset
-df = pd.read_json("data/pv_safety_review_dataset_3000.jsonl", lines=True)
+df = pd.read_json("data/pv_safety_review_dataset_3000_v2.jsonl", lines=True)
 print(f"Loaded {len(df)} samples for fine-tuning.")
 
 # Print the first instruction-response pair
