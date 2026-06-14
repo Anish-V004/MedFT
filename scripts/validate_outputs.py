@@ -39,7 +39,17 @@ EXPECTED_SYSTEM_PROMPT_V2 = (
     "3. Negative Control (Missing drug/event or noise): State \"Evaluation failed: [reason]\". Set seriousness to {\"is_serious\": false, \"criteria\": \"none\"}, meddra_pt to \"None\", expectedness to \"Unexpected\", and causality to {\"naranjo_score\": 0, \"interpretation\": \"Unassessable - Missing Data\"}."
 )
 
-VALID_SYSTEM_PROMPTS = {EXPECTED_SYSTEM_PROMPT_V1, EXPECTED_SYSTEM_PROMPT_V2}
+EXPECTED_SYSTEM_PROMPT_V3 = (
+    "You are a Pharmacovigilance (PV) Medical Review Assistant.\n\n"
+    "CRITICAL RULES:\n"
+    "Base evaluations strictly on the Patient Narrative. Do not hallucinate external details.\n\n"
+    "Output a clinical Chain of Thought as plain text first, followed by a markdown JSON block containing exactly four keys: 'seriousness', 'meddra_pt', 'expectedness', and 'causality'. Do NOT include 'chain_of_thought' inside the JSON dictionary.\n\n"
+    "SCENARIOS:\n"
+    "Valid Case: Assess Seriousness (criteria & MedDRA PT), Expectedness (via RSI or label knowledge), and Causality (Naranjo score & interpretation).\n\n"
+    "Rejection Case (Drug Mismatch / Noise): If the RSI does not match the drug, or the narrative lacks clinical data, explicitly state \"Drug Mismatch - Cannot Evaluate\" or \"Evaluation failed\" in your reasoning text. Then, set is_serious to false, output \"N/A\" for meddra_pt and expectedness, and output 0 for Naranjo score."
+)
+
+VALID_SYSTEM_PROMPTS = {EXPECTED_SYSTEM_PROMPT_V1, EXPECTED_SYSTEM_PROMPT_V2, EXPECTED_SYSTEM_PROMPT_V3}
 
 
 def validate_record(idx, data):
@@ -111,12 +121,15 @@ def validate_record(idx, data):
     if not meddra_pt or not isinstance(meddra_pt, str):
         return False, "Missing or invalid meddra_pt type."
 
-    if interpretation_clean == 'unassessable - missing data':
-        if meddra_pt.strip().lower() != 'none':
-            return False, f"Expected meddra_pt to be 'None' for Unassessable case, got '{meddra_pt}'."
+    meddra_pt_clean = meddra_pt.strip().lower()
+
+    if interpretation_clean in ('possible', 'probable', 'definite'):
+        if meddra_pt_clean in ('none', '', 'null', 'n/a'):
+            return False, f"Invalid meddra_pt value for medical review with positive causality: '{meddra_pt}'."
     else:
-        if meddra_pt.strip().lower() in ('none', '', 'null', 'n/a'):
-            return False, f"Invalid meddra_pt value for medical review: '{meddra_pt}'."
+        # Doubtful or Unassessable cases (mismatches, noise, or low-causality)
+        if meddra_pt_clean in ('', 'null'):
+            return False, f"Invalid meddra_pt value: '{meddra_pt}'."
 
     # Check seriousness block
     seriousness = json_data.get('seriousness', {})

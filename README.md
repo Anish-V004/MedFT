@@ -61,7 +61,7 @@ Retains only clinical features necessary for LLM reasoning and ChatML constructi
 - **Concurrent Batch Processing**: Features multi-threaded execution utilizing a thread-safe `google-genai` client pool. By providing multiple API keys in the `.env` file, the script distributes rate-limits across all keys simultaneously, processing multiple rows in parallel with intelligent exponential backoff on quota limits.
 
 ### Stage 5: Final Dataset Compilation
-`scripts/compile_dataset_v2.py` parses the Gemini evaluations, filters out bad responses, limits drug mismatch cases to exactly 150, programmatically updates the dataset to the optimized concise system prompt, filters out records exceeding 6,000 tokens, and balances the final dataset into 3,000 cases:
+`scripts/compile_dataset.py` parses the Gemini evaluations, filters out bad responses, limits drug mismatch cases to exactly 150, programmatically updates the dataset to the optimized concise system prompt, filters out records exceeding 6,000 tokens, and balances the final dataset into 3,000 cases:
 - 2,550 Aligned Cardiology Cases (balanced across Doubtful, Possible, and Probable/Definite Naranjo causality tiers)
 - 150 Drug Mismatch Cases (clinical refusals)
 - 300 Synthetic Negative Cases (Missing drug, missing event, or administrative noise)
@@ -121,7 +121,7 @@ uv run python generate_reviews.py --full-run --openfda
 #### Step D: Compile the Final Balanced Dataset (V2)
 Once the LLM extraction is complete, compile the final `pv_safety_review_dataset_3000_v2.jsonl` containing aligned cases, drug mismatch limits, and synthetically injected negative cases.
 ```bash
-uv run python scripts/compile_dataset_v2.py
+uv run python scripts/compile_dataset.py
 ```
 
 #### Step E: Validate Outputs

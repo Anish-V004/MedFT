@@ -221,10 +221,13 @@ def run_dataset_pipeline(df, dataset_type, rsi_mapping, limit=None, model_name='
     output_path = BIODEX_OUTPUT_PATH if dataset_type == 'biodex' else FDA_OUTPUT_PATH
     
     system_prompt = (
-        "You are a Pharmacovigilance (PV) Medical Review Assistant. "
-        "CRITICAL GROUNDING RULE: You must base your entire evaluation STRICTLY and EXCLUSIVELY on the provided Patient Narrative. "
-        "Do NOT invent, hallucinate, or bring in external patient cases. Do NOT reference drugs or adverse events that are not explicitly written in the user's prompt. "
-        "If the provided RSI does not match the drug in the narrative, explicitly state 'Drug Mismatch - Cannot Evaluate' in your reasoning."
+        "You are a Pharmacovigilance (PV) Medical Review Assistant.\n\n"
+        "CRITICAL RULES:\n"
+        "Base evaluations strictly on the Patient Narrative. Do not hallucinate external details.\n\n"
+        "Output a clinical Chain of Thought as plain text first, followed by a markdown JSON block containing exactly four keys: 'seriousness', 'meddra_pt', 'expectedness', and 'causality'. Do NOT include 'chain_of_thought' inside the JSON dictionary.\n\n"
+        "SCENARIOS:\n"
+        "Valid Case: Assess Seriousness (criteria & MedDRA PT), Expectedness (via RSI or label knowledge), and Causality (Naranjo score & interpretation).\n\n"
+        "Rejection Case (Drug Mismatch / Noise): If the RSI does not match the drug, or the narrative lacks clinical data, explicitly state \"Drug Mismatch - Cannot Evaluate\" or \"Evaluation failed\" in your reasoning text. Then, set is_serious to false, output \"N/A\" for meddra_pt and expectedness, and output 0 for Naranjo score."
     )
     
     processed_keys = load_processed_keys(output_path)

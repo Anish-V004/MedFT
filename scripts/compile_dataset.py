@@ -10,12 +10,15 @@ import tiktoken
 # Ensure UTF-8 printing on Windows
 sys.stdout.reconfigure(encoding='utf-8')
 
-# Constants
+# Optimized, concise scenario-based System Prompt
 SYSTEM_PROMPT = (
-    "You are a Pharmacovigilance (PV) Medical Review Assistant. "
-    "CRITICAL GROUNDING RULE: You must base your entire evaluation STRICTLY and EXCLUSIVELY on the provided Patient Narrative. "
-    "Do NOT invent, hallucinate, or bring in external patient cases. Do NOT reference drugs or adverse events that are not explicitly written in the user's prompt. "
-    "If the provided RSI does not match the drug in the narrative, explicitly state 'Drug Mismatch - Cannot Evaluate' in your reasoning."
+    "You are a Pharmacovigilance (PV) Medical Review Assistant.\n\n"
+    "CRITICAL RULES:\n"
+    "Base evaluations strictly on the Patient Narrative. Do not hallucinate external details.\n\n"
+    "Output a clinical Chain of Thought as plain text first, followed by a markdown JSON block containing exactly four keys: 'seriousness', 'meddra_pt', 'expectedness', and 'causality'. Do NOT include 'chain_of_thought' inside the JSON dictionary.\n\n"
+    "SCENARIOS:\n"
+    "Valid Case: Assess Seriousness (criteria & MedDRA PT), Expectedness (via RSI or label knowledge), and Causality (Naranjo score & interpretation).\n\n"
+    "Rejection Case (Drug Mismatch / Noise): If the RSI does not match the drug, or the narrative lacks clinical data, explicitly state \"Drug Mismatch - Cannot Evaluate\" or \"Evaluation failed\" in your reasoning text. Then, set is_serious to false, output \"N/A\" for meddra_pt and expectedness, and output 0 for Naranjo score."
 )
 
 ADMIN_NOISE_TEMPLATES = [
@@ -37,7 +40,7 @@ def calculate_tokens(sample, enc):
     return len(enc.encode(full_text))
 
 def parse_valid_review(sample, enc):
-    """Parses a valid ChatML review to extract its metrics and token count for balancing."""
+    """Parses a valid ChatML review to extract its metrics, token count, and mismatch status."""
     messages = sample.get('messages', [])
     if len(messages) < 3:
         return None
@@ -50,6 +53,9 @@ def parse_valid_review(sample, enc):
     
     # Check RSI availability
     rsi_avail = 'RSI not available' not in user_content
+    
+    # Check if this is a mismatch case
+    is_mismatch = "drug mismatch" in assistant_content.lower() or "cannot evaluate" in assistant_content.lower()
     
     # Extract JSON block
     start_idx = assistant_content.find('{')
@@ -79,13 +85,14 @@ def parse_valid_review(sample, enc):
             'expectedness': expectedness,
             'causality_cat': causality_cat,
             'rsi_avail': rsi_avail,
+            'is_mismatch': is_mismatch,
             'tokens': tokens
         }
     except Exception:
         return None
 
 def generate_negative_cases(count_per_cat=100):
-    """Programmatically generates diversified negative escalation samples."""
+    """Programmatically generates diversified negative escalation samples (V2 - Uniform Schema)."""
     samples = []
     
     # Load raw datasets to grab realistic demographics, reactions, and drugs
@@ -110,22 +117,23 @@ def generate_negative_cases(count_per_cat=100):
         narrative = f"A {age} year-old {sex} patient experienced the following adverse events: {reaction}. The suspect medication was not documented in the safety report."
         rsi_text = "RSI not available"
         
+        chain_of_thought = "Evaluation failed: The patient narrative does not mention any suspect medication. A clinical pharmacovigilance review cannot be performed without identifying the administered drug."
         assistant_json = {
-            "chain_of_thought": "Evaluation failed: The patient narrative does not mention any suspect medication. A clinical pharmacovigilance review cannot be performed without identifying the administered drug.",
             "seriousness": {
-                "is_serious": True,
-                "criteria": "other serious medical event"
+                "is_serious": False,
+                "criteria": "none"
             },
-            "meddra_pt": "None",
-            "expectedness": "Unexpected",
+            "meddra_pt": "N/A",
+            "expectedness": "N/A",
             "causality": {
                 "naranjo_score": 0,
-                "interpretation": "Unassessable - Missing Data"
+                "interpretation": "Doubtful"
             }
         }
         
         user_content = f"Patient Narrative:\n{narrative}\n\nReference Safety Information (RSI):\n{rsi_text}"
-        assistant_content = f"{assistant_json['chain_of_thought']}\n\n```json\n{json.dumps(assistant_json, indent=2)}\n```"
+        # Format assistant message with Chain of Thought on top, followed by 4-key JSON block (no chain_of_thought key inside JSON)
+        assistant_content = f"{chain_of_thought}\n\n```json\n{json.dumps(assistant_json, indent=2)}\n```"
         
         samples.append({
             "category": "Missing Drug",
@@ -147,22 +155,22 @@ def generate_negative_cases(count_per_cat=100):
         narrative = f"A {age} year-old {sex} patient was prescribed {drug} for cardiovascular therapy. No adverse events, complaints, or physical symptoms were reported during the follow-up period."
         rsi_text = f"BOXED WARNING:\nWARNING: Serious events are possible.\n\nWARNINGS AND CAUTIONS:\nMonitor patient closely.\n\nADVERSE REACTIONS:\nHeadache, nausea."
         
+        chain_of_thought = "Evaluation failed: The patient narrative does not describe any adverse events or reactions. A safety assessment cannot be completed without a reported reaction."
         assistant_json = {
-            "chain_of_thought": "Evaluation failed: The patient narrative does not describe any adverse events or reactions. A safety assessment cannot be completed without a reported reaction.",
             "seriousness": {
                 "is_serious": False,
                 "criteria": "none"
             },
-            "meddra_pt": "None",
-            "expectedness": "Unexpected",
+            "meddra_pt": "N/A",
+            "expectedness": "N/A",
             "causality": {
                 "naranjo_score": 0,
-                "interpretation": "Unassessable - Missing Data"
+                "interpretation": "Doubtful"
             }
         }
         
         user_content = f"Patient Narrative:\n{narrative}\n\nReference Safety Information (RSI):\n{rsi_text}"
-        assistant_content = f"{assistant_json['chain_of_thought']}\n\n```json\n{json.dumps(assistant_json, indent=2)}\n```"
+        assistant_content = f"{chain_of_thought}\n\n```json\n{json.dumps(assistant_json, indent=2)}\n```"
         
         samples.append({
             "category": "Missing Event",
@@ -182,22 +190,22 @@ def generate_negative_cases(count_per_cat=100):
         narrative = template.format(drug=drug)
         rsi_text = "RSI not available"
         
+        chain_of_thought = f"Evaluation failed: The text contains only administrative or clerical metadata ('{narrative.split('.')[0].lower()}') and does not describe a clinical patient case. No safety review can be concluded."
         assistant_json = {
-            "chain_of_thought": f"Evaluation failed: The text contains only administrative or clerical metadata ('{narrative.split('.')[0].lower()}') and does not describe a clinical patient case. No safety review can be concluded.",
             "seriousness": {
                 "is_serious": False,
                 "criteria": "none"
             },
-            "meddra_pt": "None",
-            "expectedness": "Unexpected",
+            "meddra_pt": "N/A",
+            "expectedness": "N/A",
             "causality": {
                 "naranjo_score": 0,
-                "interpretation": "Unassessable - Missing Data"
+                "interpretation": "Doubtful"
             }
         }
         
         user_content = f"Patient Narrative:\n{narrative}\n\nReference Safety Information (RSI):\n{rsi_text}"
-        assistant_content = f"{assistant_json['chain_of_thought']}\n\n```json\n{json.dumps(assistant_json, indent=2)}\n```"
+        assistant_content = f"{chain_of_thought}\n\n```json\n{json.dumps(assistant_json, indent=2)}\n```"
         
         samples.append({
             "category": "Administrative Noise",
@@ -213,13 +221,15 @@ def generate_negative_cases(count_per_cat=100):
     return samples
 
 def main():
-    parser = argparse.ArgumentParser(description="PV Dataset Compiler V2: Limits token count and balances RSI types.")
-    parser.add_argument('--output', type=str, default='data/pv_safety_review_dataset_3000.jsonl',
-                        help="Path to save the new compiled dataset.")
+    parser = argparse.ArgumentParser(description="PV Dataset Compiler V2: Enforces uniform schema and mismatch limits.")
+    parser.add_argument('--output', type=str, default='data/pv_safety_review_dataset_3000_v2.jsonl',
+                        help="Path to save the new v2 compiled dataset.")
     parser.add_argument('--max-tokens', type=int, default=6000,
                         help="Hard maximum token count limit (default 6000).")
     parser.add_argument('--pref-tokens', type=int, default=4000,
                         help="Preferred maximum token count limit (default 4000).")
+    parser.add_argument('--max-mismatch', type=int, default=150,
+                        help="Maximum drug mismatch cases to allow in the dataset.")
     args = parser.parse_args()
     
     print("==================================================")
@@ -227,124 +237,129 @@ def main():
     print("==================================================")
     
     enc = tiktoken.get_encoding("cl100k_base")
+    random.seed(42)  # Set seed for reproducibility
     
-    # 1. Load existing reviews
+    # 1. Load existing reviews from the two generated sources
     valid_pool = []
     for fpath in ['data/biodex_chatml.jsonl', 'data/fda_chatml.jsonl']:
         if os.path.exists(fpath):
             with open(fpath, 'r', encoding='utf-8') as f:
                 for line in f:
                     if line.strip():
-                        parsed = parse_valid_review(json.loads(line), enc)
+                        # Parse sample and replace system prompt with updated V2 prompt
+                        raw_sample = json.loads(line)
+                        if 'messages' in raw_sample and len(raw_sample['messages']) > 0:
+                            raw_sample['messages'][0]['content'] = SYSTEM_PROMPT
+                            
+                        parsed = parse_valid_review(raw_sample, enc)
                         if parsed:
                             valid_pool.append(parsed)
                             
-    print(f"Loaded {len(valid_pool)} valid reviews from the source pool.")
+    print(f"Loaded {len(valid_pool)} valid reviews from source pools.")
     
     # Filter by hard token limit
     filtered_pool = [r for r in valid_pool if r['tokens'] <= args.max_tokens]
-    print(f"Pool size after strictly excluding samples > {args.max_tokens} tokens: {len(filtered_pool)}")
+    print(f"Pool size after excluding samples > {args.max_tokens} tokens: {len(filtered_pool)}")
     
-    # Categorize filtered pool for balancing
-    categories = {
-        'Doubtful': [r for r in filtered_pool if r['causality_cat'] == 'Doubtful'],
-        'Possible': [r for r in filtered_pool if r['causality_cat'] == 'Possible'],
-        'Probable/Definite': [r for r in filtered_pool if r['causality_cat'] == 'Probable/Definite']
+    # 2. Partition into Aligned and Mismatch pools
+    aligned_pool = [r for r in filtered_pool if not r['is_mismatch']]
+    mismatch_pool = [r for r in filtered_pool if r['is_mismatch']]
+    
+    print(f"  - Aligned reviews available: {len(aligned_pool)}")
+    print(f"  - Drug Mismatch reviews available: {len(mismatch_pool)}")
+    
+    # 3. Select mismatch cases (target exactly args.max_mismatch)
+    num_mismatch_to_select = min(len(mismatch_pool), args.max_mismatch)
+    # Prioritize shorter mismatch cases under preferred tokens first
+    mismatch_under_pref = [r for r in mismatch_pool if r['tokens'] <= args.pref_tokens]
+    mismatch_above_pref = [r for r in mismatch_pool if r['tokens'] > args.pref_tokens]
+    
+    selected_mismatch = []
+    if len(mismatch_under_pref) >= num_mismatch_to_select:
+        selected_mismatch = random.sample(mismatch_under_pref, num_mismatch_to_select)
+    else:
+        selected_mismatch = list(mismatch_under_pref)
+        needed = num_mismatch_to_select - len(selected_mismatch)
+        selected_mismatch += random.sample(mismatch_above_pref, needed)
+        
+    print(f"Selected {len(selected_mismatch)} drug mismatch cases (max limit: {args.max_mismatch})")
+    
+    # 4. Select aligned cases to reach exactly 2,700 total medical reviews
+    target_medical_reviews = 2700
+    target_aligned = target_medical_reviews - len(selected_mismatch) # 2550
+    
+    # Separate aligned pool by Naranjo category
+    aligned_cats = {
+        'Doubtful': [r for r in aligned_pool if r['causality_cat'] == 'Doubtful'],
+        'Possible': [r for r in aligned_pool if r['causality_cat'] == 'Possible'],
+        'Probable/Definite': [r for r in aligned_pool if r['causality_cat'] == 'Probable/Definite']
     }
     
-    target_medical_size = 2700
-    target_neg_size = 300
-    
-    # Target per category if perfectly balanced
-    ideal_per_cat = target_medical_size // 3 # 900
-    
-    # Check the size of Probable/Definite
-    prob_def_pool = categories['Probable/Definite']
-    selected_prob_def = []
-    
-    # For Probable/Definite, we take all we can under args.max_tokens (since total under 6000 is 504)
-    # We prioritize under 4,000 tokens first
-    prob_def_under_pref = [r for r in prob_def_pool if r['tokens'] <= args.pref_tokens]
-    prob_def_above_pref = [r for r in prob_def_pool if r['tokens'] > args.pref_tokens]
-    
-    selected_prob_def += prob_def_under_pref
-    selected_prob_def += prob_def_above_pref
-    
-    num_prob_def = len(selected_prob_def)
-    print(f"Probable/Definite selected: {num_prob_def} (all available under {args.max_tokens} tokens)")
-    print(f"  - Under {args.pref_tokens} tokens: {len(prob_def_under_pref)}")
-    print(f"  - Between {args.pref_tokens} and {args.max_tokens} tokens: {len(prob_def_above_pref)}")
-    
-    # Calculate the remaining target to hit 2,700 total medical reviews
-    shortfall = ideal_per_cat - num_prob_def # 900 - 504 = 396
-    
-    # Split the shortfall between Possible and Doubtful
-    added_per_cat = shortfall // 2 # 198
-    target_doubtful = ideal_per_cat + added_per_cat # 1098
-    target_possible = ideal_per_cat + (shortfall - added_per_cat) # 1098
-    
-    # --- SELECT POSSIBLE (Target: 1098) ---
-    # We want to sample exactly target_possible from Possible pool.
-    # To maximize quality and meet token preferences, we look at the Possible under-pref pool (1,950 records available).
-    # We want a highly diverse split of RSI Available and RSI Not Available (AI-generated knowledge fallback).
-    possible_pool = [r for r in categories['Possible'] if r['tokens'] <= args.pref_tokens]
-    
-    poss_rsi_avail = [r for r in possible_pool if r['rsi_avail']]
-    poss_rsi_not_avail = [r for r in possible_pool if not r['rsi_avail']]
-    
-    # Sample 50% each
-    half_target = target_possible // 2
-    
-    random.seed(42) # Set seed for reproducibility
-    sampled_poss_avail = random.sample(poss_rsi_avail, min(len(poss_rsi_avail), half_target))
-    sampled_poss_not_avail = random.sample(poss_rsi_not_avail, min(len(poss_rsi_not_avail), target_possible - len(sampled_poss_avail)))
-    
-    selected_possible = sampled_poss_avail + sampled_poss_not_avail
-    # If we are still short (unlikely), fill from remainder of the Possible pool
-    if len(selected_possible) < target_possible:
-        remaining = [r for r in categories['Possible'] if r not in selected_possible]
-        selected_possible += random.sample(remaining, target_possible - len(selected_possible))
+    print("\nAligned Category Pool Sizes (under 6000 tokens):")
+    for cat, items in aligned_cats.items():
+        print(f"  - {cat}: {len(items)}")
         
-    print(f"Possible selected: {len(selected_possible)} (all under {args.pref_tokens} tokens)")
-    print(f"  - RSI Available (standard openFDA label): {len(sampled_poss_avail)}")
-    print(f"  - RSI Not Available (AI-knowledge fallback): {len(sampled_poss_not_avail)}")
+    # Selection logic targeting category balance:
+    # 1. Take all available aligned Probable/Definite records first
+    # 2. Take all available aligned Doubtful records next
+    # 3. Fill the remaining target from aligned Possible records (prioritizing under 4k tokens)
+    selected_aligned = []
     
-    # --- SELECT DOUBTFUL (Target: 1098) ---
-    # We want to select target_doubtful from Doubtful pool.
-    # Doubtful pool under-pref has 941 records.
-    # We take all 941 under-pref records first.
-    doubtful_under_pref = [r for r in categories['Doubtful'] if r['tokens'] <= args.pref_tokens]
-    doubtful_above_pref = [r for r in categories['Doubtful'] if r['tokens'] > args.pref_tokens]
+    # Select Probable/Definite
+    prob_def_aligned = aligned_cats['Probable/Definite']
+    selected_aligned += prob_def_aligned
+    print(f"\nSelecting all {len(prob_def_aligned)} aligned Probable/Definite cases.")
     
-    selected_doubtful = list(doubtful_under_pref)
-    needed_doubtful = target_doubtful - len(selected_doubtful) # 1098 - 941 = 157
+    # Select Doubtful
+    doubtful_aligned = aligned_cats['Doubtful']
+    selected_aligned += doubtful_aligned
+    print(f"Selecting all {len(doubtful_aligned)} aligned Doubtful cases.")
     
-    sampled_doubtful_above = random.sample(doubtful_above_pref, min(len(doubtful_above_pref), needed_doubtful))
-    selected_doubtful += sampled_doubtful_above
+    # Remaining needed
+    remaining_aligned_needed = target_aligned - len(selected_aligned)
+    print(f"Remaining aligned samples needed from Possible: {remaining_aligned_needed}")
     
-    print(f"Doubtful selected: {len(selected_doubtful)}")
-    print(f"  - Under {args.pref_tokens} tokens: {len(doubtful_under_pref)}")
-    print(f"  - Between {args.pref_tokens} and {args.max_tokens} tokens: {len(sampled_doubtful_above)}")
+    # Select from Possible aligned
+    poss_aligned_pool = aligned_cats['Possible']
+    poss_under_pref = [r for r in poss_aligned_pool if r['tokens'] <= args.pref_tokens]
+    poss_above_pref = [r for r in poss_aligned_pool if r['tokens'] > args.pref_tokens]
     
-    # Count RSI status for selected Doubtful
-    doubtful_rsi_avail = sum(1 for r in selected_doubtful if r['rsi_avail'])
-    doubtful_rsi_not_avail = sum(1 for r in selected_doubtful if not r['rsi_avail'])
-    print(f"  - RSI Available (standard openFDA label): {doubtful_rsi_avail}")
-    print(f"  - RSI Not Available (AI-knowledge fallback): {doubtful_rsi_not_avail}")
+    selected_poss = []
+    if len(poss_under_pref) >= remaining_aligned_needed:
+        selected_poss = random.sample(poss_under_pref, remaining_aligned_needed)
+    else:
+        selected_poss = list(poss_under_pref)
+        needed = remaining_aligned_needed - len(selected_poss)
+        selected_poss += random.sample(poss_above_pref, needed)
+        
+    selected_aligned += selected_poss
+    print(f"Selected {len(selected_poss)} aligned Possible cases.")
     
-    # 2. Generate Negatives (300 total, 100 of each, all under 500 tokens)
+    # Verify medical review counts
+    selected_medical_pool = selected_mismatch + selected_aligned
+    print(f"\nTotal selected medical reviews: {len(selected_medical_pool)}")
+    
+    # Count Naranjo categories in final selected medical reviews
+    final_cats = {}
+    for r in selected_medical_pool:
+        cat = r['causality_cat']
+        final_cats[cat] = final_cats.get(cat, 0) + 1
+    print(f"Final medical reviews category distribution: {final_cats}")
+    
+    # 5. Generate Negatives (300 total, 100 of each, uniform schema)
+    target_neg_size = 300
     print(f"\nGenerating {target_neg_size} synthetic negative controls...")
     negatives = generate_negative_cases(count_per_cat=target_neg_size // 3)
     selected_negatives = [n['sample'] for n in negatives]
     
     # Extract reviews
-    selected_medical_reviews = [r['sample'] for r in selected_prob_def + selected_possible + selected_doubtful]
+    selected_medical_reviews = [r['sample'] for r in selected_medical_pool]
     
-    # 3. Combine and Shuffle
+    # 6. Combine and Shuffle
     final_dataset = selected_medical_reviews + selected_negatives
     random.shuffle(final_dataset)
     
-    # 4. Save to New Dataset File
+    # 7. Save to V2 Dataset File
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     with open(args.output, 'w', encoding='utf-8') as f_out:
         for sample in final_dataset:
@@ -357,11 +372,13 @@ def main():
     under_4k_count = sum(1 for c in final_token_counts if c <= args.pref_tokens)
     
     print("\n" + "="*50)
-    print("COMPILATION SUMMARY - NEW DATASET")
+    print("COMPILATION SUMMARY - NEW V2 DATASET")
     print("="*50)
     print(f"Output File Path : {args.output}")
     print(f"Total Records    : {len(final_dataset)}")
     print(f"  - Medical reviews: {len(selected_medical_reviews)}")
+    print(f"    - Aligned normal: {len(selected_aligned)}")
+    print(f"    - Drug mismatches: {len(selected_mismatch)}")
     print(f"  - Negative reviews: {len(selected_negatives)}")
     print(f"Average Token Size: {mean_len:.2f} tokens")
     print(f"Max Token Size    : {max_len} tokens")
