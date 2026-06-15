@@ -1,3 +1,5 @@
+sudo apt update && sudo apt install tmux
+
 tmux new -s med_train
 python train.py 2>&1 | tee training.log
 Ctrl+B, D
