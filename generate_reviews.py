@@ -223,11 +223,12 @@ def run_dataset_pipeline(df, dataset_type, rsi_mapping, limit=None, model_name='
     system_prompt = (
         "You are a Pharmacovigilance (PV) Medical Review Assistant.\n\n"
         "CRITICAL RULES:\n"
-        "Base evaluations strictly on the Patient Narrative. Do not hallucinate external details.\n\n"
+        "1. Base your 'Expectedness' evaluation STRICTLY on the RSI (Reference Safety Information) provided in the prompt. Do NOT use your own pre-trained clinical knowledge. If the prompt states 'RSI not available', you must output 'Cannot Evaluate' for expectedness.\n"
+        "2. Base all other evaluations strictly on the Patient Narrative. Do not hallucinate external details.\n\n"
         "Output a clinical Chain of Thought as plain text first, followed by a markdown JSON block containing exactly four keys: 'seriousness', 'meddra_pt', 'expectedness', and 'causality'. Do NOT include 'chain_of_thought' inside the JSON dictionary.\n\n"
         "SCENARIOS:\n"
-        "Valid Case: Assess Seriousness (criteria & MedDRA PT), Expectedness (via RSI or label knowledge), and Causality (Naranjo score & interpretation).\n\n"
-        "Rejection Case (Drug Mismatch / Noise): If the RSI does not match the drug, or the narrative lacks clinical data, explicitly state \"Drug Mismatch - Cannot Evaluate\" or \"Evaluation failed\" in your reasoning text. Then, set is_serious to false, output \"N/A\" for meddra_pt and expectedness, and output 0 for Naranjo score."
+        "Valid Case: Assess Seriousness (criteria & MedDRA PT), Expectedness (strictly via provided RSI), and Causality (Naranjo score & interpretation).\n\n"
+        "Rejection Case (Drug Mismatch / Noise): If the suspected drug in the narrative does not match the prompt's context, or the narrative lacks clinical data, explicitly state \"Drug Mismatch - Cannot Evaluate\" or \"Evaluation failed\" in your reasoning text. Then, set is_serious to false, output \"N/A\" for meddra_pt and expectedness, and output 0 for Naranjo score."
     )
     
     processed_keys = load_processed_keys(output_path)
@@ -273,7 +274,7 @@ Reference Safety Information (RSI) for {suspected_drug}:
 [INSTRUCTIONS]
 Perform three tasks:
 1. Seriousness Assessment: Determine if the adverse event is serious based on standard regulatory criteria (Death, Hospitalization, Life-threatening, Disabling, Congenital Anomaly, or Other medically important event). Identify the exact MedDRA Preferred Term (PT) for the primary adverse event as a text string (e.g. 'Myocardial infarction').
-2. Expectedness Assessment: Compare the Patient Narrative adverse event against the provided drug's RSI text to determine if it is 'Expected' (Labelled) or 'Unexpected' (Unlabelled). If the RSI text is not available (i.e. 'RSI not available'), you must use your own pre-trained clinical medical knowledge of this drug's official label and safety profile to determine whether the event is Expected or Unexpected.
+2. Expectedness Assessment: Compare the Patient Narrative adverse event against the provided drug's RSI text to determine if it is 'Expected' (Labelled) or 'Unexpected' (Unlabelled). If the RSI text is not available (i.e. 'RSI not available'), you must output 'Cannot Evaluate'. Do NOT use your own pre-trained medical knowledge.
 3. Causality Assessment: Evaluate the relationship between the drug and the adverse event by applying the Naranjo scale logic (evaluating temporal relationship, dechallenge improvement, alternative causes, etc.). Deduce the score and assign the interpretation: Definite (score >= 9), Probable (5-8), Possible (1-4), or Doubtful (<= 0).
 """
 
