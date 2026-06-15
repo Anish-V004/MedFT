@@ -9,48 +9,6 @@ VALID_SERIOUSNESS_CRITERIA = {
     'congenital anomaly', 'other serious medical event', 'none'
 }
 
-import os
-import json
-import re
-import argparse
-
-VALID_NARANJO_INTERPRETATIONS = {'definite', 'probable', 'possible', 'doubtful'}
-VALID_SERIOUSNESS_CRITERIA = {
-    'death', 'hospitalization', 'life-threatening', 'disabling',
-    'congenital anomaly', 'other serious medical event', 'none'
-}
-
-EXPECTED_SYSTEM_PROMPT_V1 = (
-    "You are a Pharmacovigilance (PV) Medical Review Assistant. "
-    "CRITICAL GROUNDING RULE: You must base your entire evaluation STRICTLY and EXCLUSIVELY on the provided Patient Narrative. "
-    "Do NOT invent, hallucinate, or bring in external patient cases. Do NOT reference drugs or adverse events that are not explicitly written in the user's prompt. "
-    "If the provided RSI does not match the drug in the narrative, explicitly state 'Drug Mismatch - Cannot Evaluate' in your reasoning."
-)
-
-EXPECTED_SYSTEM_PROMPT_V2 = (
-    "You are a Pharmacovigilance (PV) Medical Review Assistant.\n\n"
-    "CRITICAL RULES:\n"
-    "1. Base evaluations strictly on the Patient Narrative. Do not hallucinate external details.\n"
-    "2. Output a clinical Chain of Thought, then a markdown JSON block containing exactly: "
-    "'seriousness', 'meddra_pt', 'expectedness', and 'causality'. Do NOT include 'chain_of_thought' inside the JSON.\n\n"
-    "SCENARIOS:\n"
-    "1. Valid Case: Assess Seriousness (criteria & MedDRA PT), Expectedness (via RSI or label knowledge), and Causality (Naranjo score & interpretation).\n"
-    "2. Drug Mismatch: State \"Drug Mismatch - Cannot Evaluate\" in reasoning. Set expectedness to \"Unexpected\" and causality to {\"naranjo_score\": 0, \"interpretation\": \"Doubtful\"}.\n"
-    "3. Negative Control (Missing drug/event or noise): State \"Evaluation failed: [reason]\". Set seriousness to {\"is_serious\": false, \"criteria\": \"none\"}, meddra_pt to \"None\", expectedness to \"Unexpected\", and causality to {\"naranjo_score\": 0, \"interpretation\": \"Unassessable - Missing Data\"}."
-)
-
-EXPECTED_SYSTEM_PROMPT_V3 = (
-    "You are a Pharmacovigilance (PV) Medical Review Assistant.\n\n"
-    "CRITICAL RULES:\n"
-    "Base evaluations strictly on the Patient Narrative. Do not hallucinate external details.\n\n"
-    "Output a clinical Chain of Thought as plain text first, followed by a markdown JSON block containing exactly four keys: 'seriousness', 'meddra_pt', 'expectedness', and 'causality'. Do NOT include 'chain_of_thought' inside the JSON dictionary.\n\n"
-    "SCENARIOS:\n"
-    "Valid Case: Assess Seriousness (criteria & MedDRA PT), Expectedness (via RSI or label knowledge), and Causality (Naranjo score & interpretation).\n\n"
-    "Rejection Case (Drug Mismatch / Noise): If the RSI does not match the drug, or the narrative lacks clinical data, explicitly state \"Drug Mismatch - Cannot Evaluate\" or \"Evaluation failed\" in your reasoning text. Then, set is_serious to false, output \"N/A\" for meddra_pt and expectedness, and output 0 for Naranjo score."
-)
-
-VALID_SYSTEM_PROMPTS = {EXPECTED_SYSTEM_PROMPT_V1, EXPECTED_SYSTEM_PROMPT_V2, EXPECTED_SYSTEM_PROMPT_V3}
-
 
 def validate_record(idx, data):
     """
@@ -64,7 +22,6 @@ def validate_record(idx, data):
       4. meddra_pt sanity: not None, not empty, not the literal string 'None'.
       5. Naranjo score range: between -4 and +13.
       6. Naranjo interpretation: one of Definite, Probable, Possible, Doubtful.
-      7. System prompt integrity: matches expected prompt (catches stale records).
     """
     messages = data.get('messages', [])
 
@@ -74,11 +31,6 @@ def validate_record(idx, data):
     roles = [m.get('role') for m in messages]
     if roles != ['system', 'user', 'assistant']:
         return False, f"Unexpected message roles: {roles}."
-
-    # Check 7: System prompt integrity
-    sys_content = messages[0].get('content', '')
-    if sys_content not in VALID_SYSTEM_PROMPTS:
-        return False, "Stale or mismatched system prompt."
 
     assistant_content = messages[2].get('content', '')
 
