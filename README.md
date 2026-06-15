@@ -11,9 +11,9 @@ The resulting outputs are formatted as instruction-response pairs (ChatML) speci
 To prepare a high-quality dataset for LLM fine-tuning, the pipeline enforces several core design principles:
 1. **Clinical Focus (Cardiology)**: Filters reports using standard Medical Subject Headings (MeSH category `C14` - Cardiovascular Diseases) and a highly specific regex vocabulary.
 2. **Clinical Representation (Balanced openFDA FAERS)**: To avoid dataset bias from extremely common conditions, the openFDA pipeline divides cardiology adverse events into 6 broad clinical categories and fetches exactly 500 unique reports for each.
-3. **Reference Safety Information (RSI) Grounding**: Fetches safety labels for suspected drugs from the OpenFDA labeling API so that the LLM is grounded in real medical documentation rather than hallucinating expectedness.
+3. **Reference Safety Information (RSI) Grounding & Strict Enforcement**: Fetches safety labels for suspected drugs from the OpenFDA labeling API so that the LLM is grounded in real medical documentation. The system prompts strictly enforce that Expectedness must be evaluated *only* against the provided RSI. If RSI is missing, the model is trained to output `"Cannot Evaluate"` rather than hallucinating from its pre-trained weights.
 4. **LLM Evaluation (PV Review)**: Automates clinical evaluations using Gemini models to determine Seriousness, Expectedness, and Causality (Naranjo score).
-5. **Data Balancing & Synthetic Negatives**: Compiles a final dataset (`pv_safety_review_dataset_3000.jsonl`) that perfectly balances positive cases across Naranjo causality tiers, and explicitly injects 300 synthetic "negative" cases to teach the model how to gracefully handle missing data or non-clinical text.
+5. **Data Balancing & Synthetic Negatives**: Compiles a final dataset (`pv_safety_review_dataset_3000_v2.jsonl`) that perfectly balances positive cases across Naranjo causality tiers, and explicitly injects synthetic "negative" cases to teach the model how to gracefully handle missing data or non-clinical text.
 
 ---
 
@@ -27,13 +27,15 @@ MedFT/
 ├── main.py                     # Stage 1-3: Raw pipeline entry point (Extract & clean)
 ├── generate_reviews.py         # Stage 4: Orchestrates Gemini API for PV evaluation
 ├── README.md                   # Project documentation
+├── dataset_card.md             # Detailed breakdown of dataset composition and balancing
 ├── scripts/
 │   ├── __init__.py             # Package initializer
 │   ├── prepare_cardio_subset.py  # Stage 1: BioDEX-ICSR downloader and filter
 │   ├── fetch_fda_cardio.py       # Stage 2: Balanced openFDA downloader
 │   ├── preprocess_datasets.py    # Stage 3: Clinical feature preprocessor
 │   ├── extract_rsi.py            # Utility: Fetches Reference Safety Information (RSI)
-│   ├── compile_dataset.py        # Stage 5: Balances & injects negative cases
+│   ├── normalize_drugs_gemini.py # Utility: Gemini-assisted normalization & OTC label fetching
+│   ├── compile_dataset.py        # Stage 5: Balances & injects negative cases (V2 Schema)
 │   └── validate_outputs.py       # Utility: Validates dataset schema
 └── data/                       # Directory containing all input, intermediate, and output files
 ```
@@ -53,7 +55,7 @@ Queries the FDA API (`https://api.fda.gov/drug/event.json`) to fetch exactly 500
 Retains only clinical features necessary for LLM reasoning and ChatML construction, dropping heavy metadata (DOIs, PMIDs) to save token processing costs.
 
 ### Stage 4: Reference Safety Information (RSI) & LLM Review
-- **RSI Extraction**: Queries the FDA Labeling API (`scripts/extract_rsi.py`) to retrieve the "Adverse Reactions" text for every drug in the dataset.
+- **RSI Extraction**: Queries the FDA Labeling API (`scripts/extract_rsi.py`) to retrieve the "Adverse Reactions" text for every drug in the dataset. Unmatched drugs (like OTCs) are aggressively normalized and queried again via `normalize_drugs_gemini.py`, achieving ~97% label coverage.
 - **LLM Review**: Uses `generate_reviews.py` to prompt Gemini with the Patient Narrative + RSI. It enforces a strict Pydantic JSON schema to evaluate:
   - **Seriousness**: Based on standard regulatory criteria.
   - **Expectedness**: Compared against the RSI.
@@ -61,9 +63,9 @@ Retains only clinical features necessary for LLM reasoning and ChatML constructi
 - **Concurrent Batch Processing**: Features multi-threaded execution utilizing a thread-safe `google-genai` client pool. By providing multiple API keys in the `.env` file, the script distributes rate-limits across all keys simultaneously, processing multiple rows in parallel with intelligent exponential backoff on quota limits.
 
 ### Stage 5: Final Dataset Compilation
-`scripts/compile_dataset.py` parses the Gemini evaluations, filters out bad responses, limits drug mismatch cases to exactly 150, programmatically updates the dataset to the optimized concise system prompt, filters out records exceeding 6,000 tokens, and balances the final dataset into 3,000 cases:
+`scripts/compile_dataset.py` parses the Gemini evaluations, filters out bad responses, and balances the final dataset into exactly 3,000 cases with a strict token limit (< 6,000 tokens):
 - 2,550 Aligned Cardiology Cases (balanced across Doubtful, Possible, and Probable/Definite Naranjo causality tiers)
-- 150 Drug Mismatch Cases (clinical refusals)
+- 150 Mismatch Cases (5% cap - Explicitly trains the model to output "Cannot Evaluate" when RSI is missing or drug does not match)
 - 300 Synthetic Negative Cases (Missing drug, missing event, or administrative noise)
 
 ---
@@ -97,9 +99,10 @@ uv run python main.py
 *Note: This script will automatically clear out the `data/` folder and rebuild the directories fresh.*
 
 #### Step B: Extract Reference Safety Information (RSI)
-Before generating reviews, extract the RSI for the drugs in the datasets:
+Before generating reviews, extract the RSI for the drugs in the datasets, and normalize missing ones:
 ```bash
 uv run python scripts/extract_rsi.py
+uv run python scripts/normalize_drugs_gemini.py
 ```
 
 #### Step C: Generate PV Reviews using Gemini
@@ -110,12 +113,6 @@ uv run python generate_reviews.py
 
 # Full run on both datasets
 uv run python generate_reviews.py --full-run
-
-# Run only BioDEX dataset
-uv run python generate_reviews.py --full-run --biodex
-
-# Run only openFDA dataset
-uv run python generate_reviews.py --full-run --openfda
 ```
 
 #### Step D: Compile the Final Balanced Dataset (V2)
