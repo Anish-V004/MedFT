@@ -36,8 +36,8 @@ keys_str = os.environ.get('GEMINI_API_KEYS') or os.environ.get('GEMINI_API_KEY')
 if keys_str:
     api_keys = [k.strip() for k in re.split(r'[,;]', keys_str) if k.strip()]
     
-# Also check for numbered keys: GEMINI_API_KEY_1, GEMINI_API_KEY_2, etc.
-for idx in range(1, 10):
+# Also check for numbered keys: GEMINI_API_KEY_1, GEMINI_API_KEY_2, etc. (scan up to 30 keys)
+for idx in range(1, 31):
     k = os.environ.get(f'GEMINI_API_KEY_{idx}')
     if k and k.strip() and k.strip() not in api_keys:
         api_keys.append(k.strip())
@@ -46,18 +46,71 @@ if not api_keys:
     print("Error: No GEMINI_API_KEY or GEMINI_API_KEYS found in environment.")
     sys.exit(1)
 
-def mask_key(k):
-    return k[:8] + "..." + k[-4:] if len(k) > 12 else "..."
+# Map API keys to user-friendly names to avoid printing credentials to terminal
+key_names = {k: f"Key {i+1}" for i, k in enumerate(api_keys)}
 
-print(f"Loaded {len(api_keys)} Gemini API Key(s) for rotation: {[mask_key(k) for k in api_keys]}")
+print(f"Loaded {len(api_keys)} Gemini API Key(s) for rotation: {[key_names[k] for k in api_keys]}")
 
-# Create thread-safe pool of clients
+# Create thread-safe pool of clients with their associated API keys
 client_queue = queue.Queue()
 for k in api_keys:
-    client_queue.put(genai.Client(api_key=k))
+    client_queue.put((k, genai.Client(api_key=k)))
     
 # Thread-safe lock for file writing
 file_lock = threading.Lock()
+
+# Thread-safe tracker for API key status and usage times
+consecutive_failures = 0
+consecutive_sleeps = 0
+key_last_used = {k: 0.0 for k in api_keys}
+key_consecutive_failures = {k: 0 for k in api_keys}
+disabled_keys = set()
+key_states_lock = threading.Lock()
+
+def handle_key_failure(key_val, error_msg):
+    with key_states_lock:
+        key_consecutive_failures[key_val] += 1
+        failures = key_consecutive_failures[key_val]
+        print(f"  [Key Failure] {key_names[key_val]} failed. Consecutive failures: {failures}/5.")
+        sys.stdout.flush()
+        if failures >= 5:
+            disabled_keys.add(key_val)
+            print(f"  [Key Disabled] {key_names[key_val]} has failed 5 times continuously. Removing from rotation.")
+            sys.stdout.flush()
+            if len(disabled_keys) == len(api_keys):
+                print(f"\n[FATAL] All {len(api_keys)} API keys have been disabled due to continuous failures. Terminating.")
+                sys.stdout.flush()
+                os._exit(1)
+
+def handle_rate_limit(key_val):
+    global consecutive_failures, consecutive_sleeps
+    with key_states_lock:
+        consecutive_failures += 1
+        
+        active_keys_count = len(api_keys) - len(disabled_keys)
+        # If we have tried all active keys consecutively and all hit limits
+        if consecutive_failures >= active_keys_count:
+            consecutive_sleeps += 1
+            if consecutive_sleeps >= 3:
+                print(f"\n[FATAL] All active API keys failed consecutively after multiple 65s sleeps. Genuinely exhausted daily quota. Terminating.")
+                sys.stdout.flush()
+                os._exit(1)
+                
+            print(f"\nAll active API keys hit rate/quota limit consecutively (Sleep #{consecutive_sleeps}/3). Sleeping 65s to reset window...")
+            sys.stdout.flush()
+            time.sleep(65)
+            consecutive_failures = 0  # Reset counter to retry
+        else:
+            print(f"  [Rate Limit] {key_names[key_val]} hit rate/quota limit. Rotating... (Attempt {consecutive_failures}/{active_keys_count})")
+            sys.stdout.flush()
+            time.sleep(1)  # 1s pause as in yesterday morning's code
+
+def handle_success(key_val):
+    global consecutive_failures, consecutive_sleeps
+    with key_states_lock:
+        consecutive_failures = 0
+        consecutive_sleeps = 0
+        key_consecutive_failures[key_val] = 0
 
 # Define Structured Output Schema using Pydantic
 class SeriousnessDetails(BaseModel):
@@ -297,8 +350,21 @@ Perform three tasks:
         
         while not success:
             # Get an available client (this blocks if all clients are currently executing a request)
-            client = client_queue.get()
+            key_val, client = client_queue.get()
             try:
+                # Ensure at least 4.0 seconds between requests for this specific key (15 RPM limit)
+                with key_states_lock:
+                    last_used = key_last_used.get(key_val, 0.0)
+                    now = time.time()
+                    elapsed = now - last_used
+                    wait_time = 4.0 - elapsed
+                
+                if wait_time > 0:
+                    time.sleep(wait_time)
+                
+                with key_states_lock:
+                    key_last_used[key_val] = time.time()
+
                 response = client.models.generate_content(
                     model=model_name,
                     contents=prompt_text,
@@ -312,6 +378,7 @@ Perform three tasks:
                 if response.text:
                     response_json = json.loads(response.text)
                     success = True
+                    handle_success(key_val)
                     
                     chain_of_thought = response_json.get('chain_of_thought', '')
                     decision_data = {k: v for k, v in response_json.items() if k != 'chain_of_thought'}
@@ -331,11 +398,11 @@ Perform three tasks:
                     raise Exception("Empty response text returned.")
             except Exception as e:
                 error_str = str(e)
+                handle_key_failure(key_val, error_str)
                 is_rate_limit = "429" in error_str or "quota" in error_str.lower() or "resourceexhausted" in error_str.lower() or "exhausted" in error_str.lower()
                 
                 if is_rate_limit:
-                    # Specific key hit rate limit, backoff gently (other keys continue unhindered)
-                    time.sleep(10)
+                    handle_rate_limit(key_val)
                 else:
                     retry_count += 1
                     if retry_count >= 3:
@@ -343,14 +410,15 @@ Perform three tasks:
                         break
                     time.sleep(retry_count * 5)
             finally:
-                # Always return the client to the queue
-                client_queue.put(client)
+                with key_states_lock:
+                    is_disabled = key_val in disabled_keys
+                if not is_disabled:
+                    client_queue.put((key_val, client))
                 
         return key, chatml_record, drug
 
-    # Concurrency control: max workers equal to number of keys * 2 (or just number of keys)
-    # Using len(api_keys) * 2 allows pipeline to keep queueing requests, but queue.get() regulates API load
-    max_workers = max(1, len(api_keys) * 2)
+    # Concurrency control: exactly 1 thread per API key to prevent any rate-limit bottlenecks
+    max_workers = max(1, len(api_keys))
     print(f"Executing {total_active} rows concurrently with {max_workers} threads across {len(api_keys)} API keys...")
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
