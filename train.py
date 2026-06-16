@@ -6,10 +6,10 @@ from unsloth import FastLanguageModel
 import torch
 max_seq_length = 8192 # Choose any! We auto support RoPE Scaling internally!
 dtype = None # None for auto detection. Float16 for Tesla T4, V100, Bfloat16 for Ampere+
-load_in_4bit = True # Use 4bit quantization to reduce memory usage. Can be False.
+load_in_4bit = False # Use 4bit quantization to reduce memory usage. Can be False.
 
 model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name = "unsloth/Llama-3.3-70B-Instruct", # or choose "unsloth/Llama-3.2-1B-Instruct"
+    model_name = "unsloth/Llama-3.3-70B-Instruct", # or choose "unsloth/Llama-3.3-70B-Instruct-bnb-4bit"
     max_seq_length = max_seq_length,
     dtype = dtype,
     load_in_4bit = load_in_4bit,
@@ -44,7 +44,7 @@ def load_pv_dataset(path):
     return Dataset.from_list(records)
 
 # 1. Load the full dataset from dataset/
-full_dataset = load_pv_dataset("dataset/pv_safety_review_dataset_3000.jsonl")
+full_dataset = load_pv_dataset("dataset/pv_safety_review_dataset_3000_v2.jsonl")
 
 # 2. Shuffle and split 90:10 (using a fixed seed for reproducibility)
 # This results in 2700 training samples and 300 test/evaluation samples.
@@ -82,7 +82,7 @@ trainer = SFTTrainer(
         gradient_accumulation_steps = 8,
         # warmup_steps = 5,
         warmup_ratio = 0.05,
-        num_train_epochs = 2, # Set this for 1 full training run.
+        num_train_epochs = 3, # Set this for 1 full training run.
         learning_rate = 2e-5,
         logging_steps = 1,
         optim = "adamw_8bit",
@@ -108,13 +108,14 @@ trainer = train_on_responses_only(
     response_part = "<|start_header_id|>assistant<|end_header_id|>\n\n",
 )
 
-# trainer_stats = trainer.train()
-resume_checkpoint = True if os.path.exists("outputs") and any("checkpoint" in d for d in os.listdir("outputs")) else False
+trainer_stats = trainer.train()
+# resume_checkpoint = True if os.path.exists("outputs") and any("checkpoint" in d for d in os.listdir("outputs")) else False
 
-trainer_stats = trainer.train(resume_from_checkpoint=resume_checkpoint)
+# trainer_stats = trainer.train(resume_from_checkpoint=True)
 
-model.save_pretrained("MedFT_Llama3_3_70B_16bit_adapters")  # Local saving
-tokenizer.save_pretrained("MedFT_Llama3_3_70B_16bit_adapters")
-model.push_to_hub("AnishV004/MedFT_Llama3_3_70B_16bit_adapters", token = "") # Online saving
-tokenizer.push_to_hub("AnishV004/MedFT_Llama3_3_70B_16bit_adapters", token = "") # Online saving
-
+print("saving models")
+model.save_pretrained("MedFT_Llama3_3_70B_V2")  # Local saving
+tokenizer.save_pretrained("MedFT_Llama3_3_70B_V2")
+model.push_to_hub("AnishV004/MedFT_Llama3_3_70B_V2", token = "") # Online saving
+tokenizer.push_to_hub("AnishV004/MedFT_Llama3_3_70B_V2", token = "") # Online saving
+print("Saved")
