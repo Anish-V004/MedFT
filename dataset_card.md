@@ -73,3 +73,65 @@ Exactly **5% (150 samples)** of the dataset consists of cases where the FDA safe
 
 ### 4. Token Limits
 To ensure efficient training and inference, the compilation script enforces strict token boundaries using the `cl100k_base` tokenizer. Outlier documents containing massive 10,000+ token narratives are systematically excluded, with a strong preference for samples under 4,000 tokens.
+
+---
+
+## Complete Training Sample Example
+
+The following is one real, end-to-end training sample from the dataset, formatted in **ChatML** (used for Llama 3 fine-tuning via Unsloth).
+
+### Role: `system`
+
+```text
+You are a Pharmacovigilance (PV) Medical Review Assistant.
+
+CRITICAL RULES:
+1. Base your 'Expectedness' evaluation STRICTLY on the RSI (Reference Safety Information) provided in the prompt. Do NOT use your own pre-trained clinical knowledge. If the prompt states 'RSI not available', you must output 'Cannot Evaluate' for expectedness.
+2. Base all other evaluations strictly on the Patient Narrative. Do not hallucinate external details.
+
+Output a clinical Chain of Thought as plain text first, followed by a markdown JSON block containing exactly four keys: 'seriousness', 'meddra_pt', 'expectedness', and 'causality'. Do NOT include 'chain_of_thought' inside the JSON dictionary.
+
+SCENARIOS:
+Valid Case: Assess Seriousness (criteria & MedDRA PT), Expectedness (strictly via provided RSI), and Causality (Naranjo score & interpretation).
+
+Rejection Case (Drug Mismatch / Noise): If the suspected drug in the narrative does not match the prompt's context, or the narrative lacks clinical data, explicitly state "Drug Mismatch - Cannot Evaluate" or "Evaluation failed" in your reasoning text. Then, set is_serious to false, output "N/A" for meddra_pt and expectedness, and output 0 for Naranjo score.
+```
+
+### Role: `user`
+
+```text
+Patient Narrative:
+BACKGROUND
+Eptifibatide is a platelet glycoprotein IIb/IIIa (GP IIb/IIIa) receptor antagonist that inhibits fibrinogen binding to the activated GP IIb/IIIa site and prevents platelet-platelet interaction and clot formation. GP IIb/IIIa inhibitors improve outcome in patients undergoing percutaneous coronary intervention for acute coronary syndrome. Thrombocytopenia is a complication of GP IIb/IIIa inhibitors, but severe thrombocytopenia is unusual. Most reported cases of severe thrombocytopenia after eptifibatide occurred in patients with acute coronary syndrome. The authors describe a patient who developed acute profound thrombocytopenia after receiving eptifibatide before emergent coronary artery bypass graft surgery.
+
+METHODS
+A 67-year-old man with a normal platelet count (220 K/uL) developed atrial fibrillation, left bundle branch block, and respiratory insufficiency consistent with acute coronary syndrome two days after colectomy. He received eptifibatide during cardiac catheterization, where three-vessel coronary artery disease was encountered. Emergent coronary artery surgery was planned, but the platelet count before surgery was 2 K/uL. Eptifibatide was discontinued, surgery was postponed, and acute coronary syndrome was treated with intraaortic balloon counterpulsation.
+
+CONCLUSIONS
+The authors describe the second reported case of eptifibatide-induced severe thrombocytopenia associated with cardiac surgery. In this case, discontinuation of eptifibatide and transfusion of apheresis platelets increased the platelet count (137 K/uL) the following day, and the patient subsequently underwent successful coronary artery surgery using cardiopulmonary bypass.
+
+Reference Safety Information (RSI) for Eptifibatide:
+5.2 Thrombocytopenia — There have been reports of acute, profound thrombocytopenia (immune-mediated and non-immune mediated) with eptifibatide. In the event of acute profound thrombocytopenia or a confirmed platelet decrease to <100,000/mm³, discontinue eptifibatide and heparin. Monitor serial platelet counts, assess the presence of drug-dependent antibodies, and treat as appropriate. Acute profound thrombocytopenia, as well as immune-mediated thrombocytopenia, have been reported in post-approval use.
+```
+
+### Role: `assistant`
+
+```text
+The patient developed acute profound thrombocytopenia (platelet count 2 K/uL) following administration of eptifibatide. The temporal association is clear — the drop occurred after drug exposure but before planned surgery. Dechallenge occurred upon discontinuation of eptifibatide, with clear clinical improvement (platelet count recovery to 137 K/uL the next day). The event is serious as it led to the postponement of emergent cardiac surgery, meeting the 'other serious medical event' criterion. Thrombocytopenia is explicitly listed in the RSI (Section 5.2), making the event 'Expected'. Naranjo scoring: +1 (previous conclusive reports in literature and RSI), +2 (event appeared after drug administration), +1 (improvement after dechallenge/discontinuation), -1 (alternative causes such as post-operative state or concurrent heparin cannot be fully excluded), +1 (objective evidence — platelet count confirmed lab result) = total of 5.
+
+```json
+{
+  "seriousness": {
+    "is_serious": true,
+    "criteria": "other serious medical event"
+  },
+  "meddra_pt": "Thrombocytopenia",
+  "expectedness": "Expected",
+  "causality": {
+    "naranjo_score": 5,
+    "interpretation": "Probable"
+  }
+}
+```
+```
+
