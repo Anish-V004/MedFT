@@ -368,9 +368,11 @@ def main():
     row += 1
     
     avg_score = sum(scores) / len(scores) if scores else 0.0
+    l_all_3 = sum(1 for e in valid_llm if e["clinical_accuracy_score"] is not None and e["clinical_accuracy_score"] >= 3)
     final = [
         ("Manual Evaluation Accuracy (all fields exact match)", pct(m_all, total)),
         ("LLM Judge Clinical Accuracy Rate (Score >= 4)", pct(l_all, len(valid_llm))),
+        ("LLM Judge Clinical Acceptability Rate (Score >= 3)", pct(l_all_3, len(valid_llm))),
         ("Average Clinical Accuracy Score (out of 5.0)", f"{avg_score:.2f} / 5.0"),
         ("Inter-Method Agreement Rate", pct(both_acc + both_inacc, vl)),
     ]
@@ -380,11 +382,17 @@ def main():
         c = ws2.cell(row=ri3, column=2, value=val)
         c.font = Font(bold=True, size=14)
         c.border = THIN
-        v = float(val.replace("%", "").split("/")[0].strip()) if "%" in val or "/" in val else 0
+        
+        try:
+            v_str = val.replace("%", "").split("/")[0].strip()
+            v = float(v_str) if v_str else 0.0
+        except Exception:
+            v = 0.0
+            
         if "%" in val:
             c.fill = GREEN if v >= 80 else (YELLOW if v >= 60 else RED)
         elif "/" in val:
-            c.fill = GREEN if avg_score >= 4.0 else (YELLOW if avg_score >= 3.0 else RED)
+            c.fill = GREEN if v >= 4.0 else (YELLOW if v >= 3.0 else RED)
 
     # Column widths
     ws2.column_dimensions["A"].width = 48
@@ -394,11 +402,20 @@ def main():
     ws2.column_dimensions["E"].width = 22
 
     wb.save(OUTPUT)
+    
+    # Also save to root evaluations folder if it exists
+    root_eval_dir = os.path.join(os.path.dirname(os.path.dirname(BASE)), "evaluations")
+    if os.path.exists(root_eval_dir):
+        root_output = os.path.join(root_eval_dir, "pv_consolidated_accuracy.xlsx")
+        wb.save(root_output)
+        print(f"  Also saved copy to: {root_output}")
+
     print(f"\n{'='*60}")
     print(f"  CONSOLIDATED REPORT COMPLETE")
     print(f"  Samples: {total}")
     print(f"  Manual Accuracy (all match):  {pct(m_all, total)}")
     print(f"  LLM Judge Accuracy (Score>=4): {pct(l_all, len(valid_llm))}")
+    print(f"  LLM Judge Acceptability (Score>=3): {pct(l_all_3, len(valid_llm))}")
     print(f"  Average Score:                {avg_score:.2f}/5.0")
     print(f"  Agreement Rate:               {pct(both_acc + both_inacc, vl)}")
     print(f"{'='*60}")
