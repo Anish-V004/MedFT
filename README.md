@@ -144,3 +144,61 @@ print(f"Loaded {len(df)} samples for fine-tuning.")
 print(df.iloc[0]['messages'][1]['content'])  # User Prompt
 print(df.iloc[0]['messages'][2]['content'])  # Assistant Response
 ```
+
+---
+
+## 🧬 MedAssist PV Review Assistant (Gradio Web App)
+
+**MedAssist** is a Gradio-based web application that provides a clean, responsive, and visual interface for clinical teams to perform automated pharmacovigilance safety reviews. 
+
+### 1. Serving the Fine-Tuned Model via vLLM
+The specialized Llama-3.3-70B model (fine-tuned on the cardiology safety review dataset) is served as a high-throughput endpoint using **vLLM** with active LoRA module loading.
+
+Run the following command to serve the model locally:
+```bash
+vllm serve unsloth/Llama-3.3-70B-Instruct \
+  --enable-lora \
+  --lora-modules medft=AnishV004/MedFT_Llama3_3_70B_V2 \
+  --max-lora-rank 64 \
+  --port 5000 \
+  --max-model-len 8192
+```
+
+### 2. Multi-Model serving & Resource Justification
+* Due to GPU hardware limitations on the host platform, hosting a second large-scale LLM on-premise alongside the specialized **Llama 3.3 70B** was not feasible.
+* To circumvent this and demonstrate how multi-agent workflows can be scaled cost-effectively, we used **Ollama Cloud** to provision a smaller, highly efficient open-source model: **`gpt-oss:20b-cloud`** (used for synthesizing the final consolidated report).
+* This architecture proves that smaller open-source LLMs can be successfully leveraged for clinical summary writing and report consolidation tasks, freeing up core GPU compute for the heavy fine-tuned model that performs the primary safety assessments.
+
+### 3. Running the Gradio App
+Start the Gradio frontend locally using `uv`:
+```bash
+uv run gradio medassist_app/app.py
+```
+The app will run locally and become accessible at `http://127.0.0.1:7860/`.
+
+---
+
+## 📊 Sample Output Screens
+
+Below are visual samples demonstrating the app inputs, per-drug cards, and consolidated clinical reports for various pharmacovigilance scenarios:
+
+### Case 1: One Drug — RSI Available Case (ALTEPLASE)
+* **Input Stage:** The user enters the narrative and selects `ALTEPLASE` as the suspected drug.
+  ![Case 1 Input](samples/1q.png)
+* **Results Stage:** The fine-tuned model identifies the cerebral haemorrhage as a serious, expected trial event with possible causality.
+  ![Case 1 Results](samples/1a.png)
+
+### Case 2: Multiple Drugs — RSI Available in All (PLAVIX & ASPIRIN)
+* **Input Stage:** Dual suspected drugs are entered.
+  ![Case 2 Input](samples/2q.png)
+* **Per-Drug Cards:** Identifies individual expectedness and Naranjo causality ratings for each drug.
+  ![Case 2 Cards](samples/2a1.png)
+* **Consolidated Report:** The smaller `gpt-oss:20b-cloud` model consolidates both cards into a clean clinical report table with recommended PV actions.
+  ![Case 2 Report](samples/2a2.png)
+
+### Case 5: Edge Case — Drug Mismatch Rejection
+* **Input Stage:** A narrative about Graves' disease and propranolol is entered, but the suspected drug field specifies an unrelated drug (`HYDROCORTISONE`).
+  ![Case 5 Input](samples/5q.png)
+* **Results Stage:** The system flags the mismatch, sets default values, and safely aborts the evaluation.
+  ![Case 5 Rejection](samples/5a.png)
+
