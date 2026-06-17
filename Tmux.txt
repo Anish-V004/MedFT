@@ -1,14 +1,30 @@
+# Install tmux
 sudo apt update && sudo apt install tmux
 
+# Creates a new detachable terminal session named 'med_train'
+# You can close your SSH connection and this session stays alive on the server
 tmux new -s med_train
+
+# Runs training and captures all output (stdout + stderr) into training.log
+# 2>&1 merges error output into stdout; tee writes it to file AND shows it on screen
 python train.py 2>&1 | tee training.log
+
+# Detaches from the session — leaves it running in the background
+# Press Ctrl+B first, then release and press D
 Ctrl+B, D
+
+# Re-attaches to the running session (use this after reconnecting via SSH)
 tmux attach -t med_train
 
 # To kill your specific medical training session
+# Permanently stops the session and any programs running inside it
 tmux kill-session -t med_train
 
+# Lists all active tmux sessions on this machine (name, creation time, status)
 tmux ls
+
+# Kill any session by replacing <session_name> with the name shown in 'tmux ls'
 tmux kill-session -t <session_name>
 
+# Attach back to med_train if you detached with Ctrl+B, D
 tmux attach -t med_train
