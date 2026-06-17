@@ -542,18 +542,19 @@ with gr.Blocks(title="MedAssist · PV Review Assistant") as demo:
 
         # ── LEFT PANEL ────────────────────────────────────────────────────────
         with gr.Column():
-            gr.HTML('<div class="panel-label">📋 Case Input</div>')
+            gr.HTML('<div class="panel-label">📋 Patient Narrative</div>')
 
             narrative_input = gr.Textbox(
                 label="PATIENT NARRATIVE",
+                show_label=False,
                 placeholder=(
                     "Enter the full patient narrative here…\n\n"
                     "e.g. A 67-year-old male patient with hypertension presented with "
                     "sudden onset chest pain radiating to the left arm, 2 weeks after "
                     "starting aspirin and atorvastatin therapy…"
                 ),
-                lines=10,
-                max_lines=20,
+                lines=5,
+                max_lines=10,
                 elem_id="narrative_input",
             )
 
@@ -566,6 +567,7 @@ with gr.Blocks(title="MedAssist · PV Review Assistant") as demo:
 
             drug_input = gr.Textbox(
                 label="SUSPECTED DRUGS",
+                show_label=False,
                 placeholder="e.g. Atorvastatin, Aspirin, Metoprolol",
                 elem_id="drug_input",
             )
