@@ -16,3 +16,6 @@ wheels/
 /data/archive
 
 .gradio
+
+generate_submission_docx.py
+MedAssist_codes.docx
